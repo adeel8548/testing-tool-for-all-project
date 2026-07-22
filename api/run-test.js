@@ -165,6 +165,11 @@ async function auditPage(page, targetUrl, progress, workflowConfig = [], testDat
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
     progress('check_started', { check: 'Authenticated route discovery', checkIndex: 2, totalChecks: 12, message: 'Opening navigation menus and discovering routes' });
     const links = await discoverMenuRoutes(page, targetUrl);
+    const screenshot = await page.screenshot({ type: 'jpeg', quality: 45, fullPage: false }).catch(() => null);
+    if (screenshot) progress('page_preview', {
+      status: 'information', message: 'Live page preview updated',
+      preview: `data:image/jpeg;base64,${screenshot.toString('base64')}`
+    });
     progress('check_started', { check: 'DOM, accessibility and functional inspection', checkIndex: 3, totalChecks: 12, message: 'Inspecting page structure, controls, images and workflows' });
     const facts = await page.evaluate(() => {
       const visible = element => Boolean(element.getClientRects().length);

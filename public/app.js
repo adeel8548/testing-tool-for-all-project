@@ -60,7 +60,7 @@ function setProgress(event) {
 }
 
 function handleEvent(event, restoring = false) {
-  if (!restoring) events.push(event);
+  if (!restoring) events.push(event.type === 'page_preview' ? { ...event, preview: undefined } : event);
   currentRunId = event.runId || currentRunId;
   addLog(event); setProgress(event);
   if (event.type === 'audit_created') {
@@ -73,6 +73,10 @@ function handleEvent(event, restoring = false) {
     routes.set(event.url, { url: event.url, status: 'testing' });
     $('#current-page-title').textContent = `Testing page ${event.pageIndex} of ${event.totalPages}`;
     $('#current-page-url').textContent = event.url; $('#current-check').textContent = 'Loading page';
+    $('#page-preview').hidden = true; $('#preview-empty').hidden = false; $('#preview-empty').textContent = 'Loading live page preview…';
+  }
+  if (event.type === 'page_preview' && event.preview) {
+    $('#page-preview').src = event.preview; $('#page-preview').hidden = false; $('#preview-empty').hidden = true;
   }
   if (event.type === 'check_started') $('#current-check').textContent = event.check || event.message;
   if (event.type === 'workflow_discovered') {
