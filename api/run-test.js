@@ -126,7 +126,9 @@ export async function discoverMenuRoutes(page, base, progress, deepDiscovery = t
     '[data-bs-toggle="dropdown"]', '[data-toggle="dropdown"]', '[data-menu-trigger]',
     '.dropdown-toggle', '.accordion-header', '.accordion-button', '.submenu-toggle', '.menu-toggle',
     '.sidebar-toggle', '.navbar-toggler', '.hamburger', '[class*="chevron"]',
-    'nav li:has(ul)', '[role="navigation"] li:has(ul)', '[role="menuitem"]', 'summary'
+    'nav li:has(ul)', '[role="navigation"] li:has(ul)', '[role="menuitem"]', 'summary',
+    'nav button', 'aside button', '[role="navigation"] button', '[role="menu"] button',
+    '[class*="sidebar" i] button', '[class*="menu" i] [role="button"]'
   ].join(', ');
   const unsafe = /\b(log\s*out|sign\s*out|delete|remove|reset|clear data|payment|pay now|approve|reject|archive|deactivate|disable|destroy|purge)\b/i;
   const marker = `audit-${Date.now()}`; const opened = [];
@@ -152,14 +154,17 @@ export async function discoverMenuRoutes(page, base, progress, deepDiscovery = t
         const label = (element.getAttribute('aria-label') || element.textContent || element.getAttribute('title') || '').trim().replace(/\s+/g, ' ').slice(0, 120);
         const expanded = element.getAttribute('aria-expanded'); const state = element.getAttribute('data-state');
         const classes = String(element.className || '');
+        const navigationContext = Boolean(element.closest('nav,aside,[role="navigation"],[role="menu"],[class*="sidebar" i],[class*="menu" i]'));
+        const chevron = Boolean(element.querySelector('svg,[class*="chevron" i],[class*="arrow" i],[class*="caret" i]'));
+        const nestedContainer = Boolean(element.nextElementSibling?.matches('ul,menu,nav,[role="menu"],.submenu,.dropdown-menu,.collapse') || element.parentElement?.querySelector(':scope > ul,:scope > menu,:scope > .submenu,:scope > .dropdown-menu'));
         const structural = Boolean(element.getAttribute('aria-controls') || element.getAttribute('aria-haspopup') ||
           element.matches('summary,button,[role="button"]') && (element.nextElementSibling?.matches('ul,menu,nav,[role="menu"],.submenu,.dropdown-menu,.collapse') || element.parentElement?.querySelector(':scope > ul,:scope > menu,:scope > .submenu,:scope > .dropdown-menu')));
         const semantic = expanded !== null || state === 'closed' || /menu|submenu|dropdown|accordion|nav|sidebar|hamburger|chevron|collapse|expand/i.test(classes);
-        return { processed: false, label: label || 'unnamed control', open: expanded === 'true' || state === 'open', confident: structural || semantic };
+        return { processed: false, label: label || 'unnamed control', open: expanded === 'true' || state === 'open', confident: structural || semantic || (navigationContext && (chevron || nestedContainer)) };
       }, marker).catch(() => ({ processed: true }));
       if (info.processed) continue;
       if (unsafe.test(info.label)) { progress('route_discovery_debug', { status: 'warning', message: `Skipped unsafe control: ${info.label}` }); continue; }
-      if (!info.confident) { progress('route_discovery_debug', { status: 'information', message: `Skipped uncertain control: ${info.label}` }); continue; }
+      if (!info.confident) { await trigger.evaluate(element => element.removeAttribute('data-audit-route-marker')).catch(() => {}); progress('route_discovery_debug', { status: 'information', message: `Deferred non-expander navigation control: ${info.label}` }); continue; }
       if (info.open) { await announceRoutes(`open menu ${info.label}`); continue; }
       progress('route_discovery_debug', { status: 'testing', message: `Expanding ${info.label}` });
       try {
@@ -175,8 +180,8 @@ export async function discoverMenuRoutes(page, base, progress, deepDiscovery = t
     }
     if (!expandedAtDepth) break;
   }
-  const clickTargets = page.locator('nav [role="menuitem"]:not([href]), [role="navigation"] [role="menuitem"]:not([href]), nav button[data-url], nav button[data-route], nav button[data-path]');
-  const clickCount = Math.min(await clickTargets.count(), 25);
+  const clickTargets = page.locator('nav [role="menuitem"]:not([href]):not([data-audit-route-marker]), [role="navigation"] [role="menuitem"]:not([href]):not([data-audit-route-marker]), nav button:not([aria-expanded]):not([aria-controls]):not([data-audit-route-marker]), aside button:not([aria-expanded]):not([aria-controls]):not([data-audit-route-marker]), [class*="sidebar" i] button:not([aria-expanded]):not([aria-controls]):not([data-audit-route-marker]), nav button[data-url]:not([data-audit-route-marker]), nav button[data-route]:not([data-audit-route-marker]), nav button[data-path]:not([data-audit-route-marker])');
+  const clickCount = Math.min(await clickTargets.count(), 75);
   for (let index = 0; index < clickCount; index += 1) {
     const item = clickTargets.nth(index); const label = (await item.getAttribute('aria-label') || await item.textContent() || '').trim().slice(0, 120);
     if (!label || unsafe.test(label) || !await item.isVisible().catch(() => false)) continue;
@@ -366,7 +371,7 @@ export default async function handler(request, response) {
 
   let browser;
   try {
-    const maxPages = Math.min(Math.max(Number(body?.maxPages) || 5, 1), 25);
+    const maxPages = Math.min(Math.max(Number(body?.maxPages) || 100, 1), 100);
     const testingDepth = ['basic', 'functional', 'full-crud'].includes(body?.testingDepth) ? body.testingDepth : 'basic';
     const dataSafety = ['generated-only', 'read-only', 'disposable'].includes(body?.dataSafety) ? body.dataSafety : 'read-only';
     const testingMode = testingDepth !== 'full-crud' || dataSafety === 'read-only' ? 'read-only' : dataSafety === 'disposable' ? 'full-staging' : 'safe-crud';
@@ -434,6 +439,7 @@ export default async function handler(request, response) {
         emit('error', { stage: 'page_audit', status: 'failed', pageIndex, totalPages, url: safe.href, message: `Page failed: ${result.pageErrors[0]}` });
       }
       pages.push(result);
+      const priorityRoutes = [];
       for (const link of result.links) {
         const candidate = crawlCandidate(link, target.origin);
         if (candidate) {
@@ -441,10 +447,11 @@ export default async function handler(request, response) {
           occurrence.count += 1; occurrence.pages.add(result.url); linkOccurrences.set(candidate.href, occurrence);
         }
         if (candidate && !queued.has(candidate.href)) {
-          queue.push(candidate.href); queued.add(candidate.href);
+          priorityRoutes.push(candidate.href); queued.add(candidate.href);
           emit('route_discovered', { stage: 'discovering_routes', status: 'waiting', url: candidate.href, totalPages: Math.min(queued.size, maxPages), message: `Route discovered: ${candidate.pathname}` });
         }
       }
+      queue.unshift(...priorityRoutes);
       const pageIssues = result.checks.filter(check => !check.passed).length;
       emit('page_completed', {
         stage: 'page_audit', status: pageIssues ? 'issues' : 'passed', pageIndex, totalPages: Math.min(queued.size, maxPages),
