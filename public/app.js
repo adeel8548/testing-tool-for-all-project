@@ -32,9 +32,9 @@ form.addEventListener('submit', async event => {
   status.textContent = 'Starting isolated browser… this can take up to a few minutes.';
   const value = id => document.querySelector(`#${id}`).value.trim();
   const payload = { targetUrl: value('target-url'), maxPages: Number(value('max-pages')) };
-  if (value('email') || value('password')) payload.login = {
-    url: value('login-url'), email: value('email'), password: value('password'),
-    emailSelector: value('email-selector'), passwordSelector: value('password-selector'), submitSelector: value('submit-selector')
+  if (value('login-identifier') || value('password')) payload.login = {
+    url: value('login-url'), identifier: value('login-identifier'), password: value('password'),
+    identifierSelector: value('identifier-selector'), passwordSelector: value('password-selector'), submitSelector: value('submit-selector')
   };
   try {
     const response = await fetch('/api/run-test', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-platform-key': value('access-key') }, body: JSON.stringify(payload) });

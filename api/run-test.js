@@ -36,17 +36,18 @@ async function safeUrl(raw, expectedOrigin) {
 
 function locatorFor(page, kind, configured) {
   if (configured) return page.locator(configured).first();
-  if (kind === 'email') return page.locator('input[type="email"], input[name*="email" i], input[autocomplete="username"]').first();
+  if (kind === 'identifier') return page.locator('input[type="email"], input[name*="email" i], input[name*="user" i], input[id*="email" i], input[id*="user" i], input[autocomplete="username"], input[type="text"]').first();
   return page.locator('input[type="password"], input[autocomplete="current-password"]').first();
 }
 
 async function login(page, loginConfig, origin) {
-  if (!loginConfig?.email || !loginConfig?.password) return { attempted: false };
+  const identifier = loginConfig?.identifier || loginConfig?.email;
+  if (!identifier || !loginConfig?.password) return { attempted: false };
   const loginTarget = await safeUrl(loginConfig.url || origin, origin);
   await page.goto(loginTarget.href, { waitUntil: 'domcontentloaded' });
-  const email = locatorFor(page, 'email', loginConfig.emailSelector);
+  const identifierField = locatorFor(page, 'identifier', loginConfig.identifierSelector || loginConfig.emailSelector);
   const password = locatorFor(page, 'password', loginConfig.passwordSelector);
-  await email.fill(loginConfig.email);
+  await identifierField.fill(identifier);
   await password.fill(loginConfig.password);
   const submit = loginConfig.submitSelector
     ? page.locator(loginConfig.submitSelector).first()
@@ -126,7 +127,7 @@ export default async function handler(request, response) {
   try {
     const body = typeof request.body === 'string' ? JSON.parse(request.body) : request.body;
     const target = await safeUrl(body?.targetUrl);
-    const maxPages = Math.min(Math.max(Number(body?.maxPages) || 5, 1), 10);
+    const maxPages = Math.min(Math.max(Number(body?.maxPages) || 5, 1), 25);
     if (body?.login?.url) await safeUrl(body.login.url, target.origin);
     const timeout = setTimeout(() => browser?.close().catch(() => {}), 270_000);
     const executablePath = process.env.VERCEL ? await chromiumPack.executablePath() : undefined;

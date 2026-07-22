@@ -4,12 +4,12 @@
 <div class="layout"><form id="test-form" class="panel" autocomplete="off"><div class="panel-head"><div><p class="eyebrow">NEW TEST RUN</p><h2>Target configuration</h2></div><span class="required">* Required</span></div>
 <label>Platform access key *<input id="access-key" name="accessKey" type="password" required autocomplete="off" placeholder="Configured in Vercel"></label>
 <label>Application URL *<input id="target-url" name="targetUrl" type="url" required placeholder="https://staging.example.com"></label>
-<label>Maximum pages<select id="max-pages" name="maxPages"><option>1</option><option selected>5</option><option>10</option></select></label>
+<label>Maximum pages<select id="max-pages" name="maxPages"><option>1</option><option selected>5</option><option>10</option><option>25</option></select></label>
 <details><summary>Authenticated login (optional)</summary><div class="details-grid">
 <label>Login URL<input id="login-url" name="loginUrl" type="url" placeholder="https://staging.example.com/login"></label>
-<label>Test email<input id="email" name="email" type="email" autocomplete="off"></label>
+<label>Email or username<input id="login-identifier" name="loginIdentifier" type="text" autocomplete="off"></label>
 <label>Test password<input id="password" name="password" type="password" autocomplete="off"></label>
-<label>Email CSS selector<input id="email-selector" name="emailSelector" placeholder="Auto-detected"></label>
+<label>Email/username CSS selector<input id="identifier-selector" name="identifierSelector" placeholder="Auto-detected"></label>
 <label>Password CSS selector<input id="password-selector" name="passwordSelector" placeholder="Auto-detected"></label>
 <label>Submit CSS selector<input id="submit-selector" name="submitSelector" placeholder="Auto-detected"></label></div></details>
 <div class="notice"><b>Safety:</b> use an isolated test account. Credentials are sent over HTTPS for this run only and are not included in the report or browser storage.</div>
