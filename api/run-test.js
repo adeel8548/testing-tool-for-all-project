@@ -397,7 +397,7 @@ export default async function handler(request, response) {
     page.setDefaultTimeout(12_000); page.setDefaultNavigationTimeout(25_000);
     const loginResult = await login(page, body.login, target.origin, emit);
 
-    emit('route_discovery_started', { stage: 'discovering_routes', status: 'running', message: 'Discovering authenticated internal routes' });
+    emit('route_discovery_started', { stage: 'discovering_routes', status: 'running', message: 'Loading authenticated sidebar before any page audits' });
     const requestedUrls = Array.isArray(body?.pageUrls) ? body.pageUrls.slice(0, maxPages) : [];
     const discoveredUrls = await sitemapUrls(target, maxPages);
     const startingUrls = [];
@@ -407,17 +407,22 @@ export default async function handler(request, response) {
       startingUrls.push(dashboard.href);
     }
     if (!startingUrls.includes(target.href)) startingUrls.push(target.href);
-    const queue = [...startingUrls]; const queued = new Set(queue); const visited = new Set(); const pages = [];
+    const discoveryRoot = startingUrls[0];
+    emit('route_discovery_debug', { stage: 'discovering_routes', status: 'testing', url: discoveryRoot, message: `Opening authenticated landing page for complete sidebar discovery: ${new URL(discoveryRoot).pathname}` });
+    if (page.url() !== discoveryRoot) await page.goto(discoveryRoot, { waitUntil: 'domcontentloaded' });
+    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    const sidebarUrls = await discoverMenuRoutes(page, discoveryRoot, (type, data) => emit(type, { stage: 'discovering_routes', url: discoveryRoot, ...data }), true);
+    const queue = []; const queued = new Set(); const visited = new Set(); const pages = [];
     const linkOccurrences = new Map();
-    for (const url of startingUrls) emit('route_discovered', { stage: 'discovering_routes', status: 'waiting', url, message: `Route discovered: ${new URL(url).pathname}` });
-    for (const raw of [...requestedUrls, ...discoveredUrls]) {
+    for (const raw of [discoveryRoot, ...sidebarUrls, ...startingUrls.slice(1), ...requestedUrls, ...discoveredUrls]) {
       const candidate = crawlCandidate(raw, target.origin);
       if (candidate && !queued.has(candidate.href)) {
         queue.push(candidate.href); queued.add(candidate.href);
         emit('route_discovered', { stage: 'discovering_routes', status: 'waiting', url: candidate.href, message: `Route discovered: ${candidate.pathname}` });
       }
     }
-    emit('route_discovery_completed', { stage: 'discovering_routes', status: 'passed', totalPages: Math.min(queue.length, maxPages), message: `${Math.min(queue.length, maxPages)} unique routes ready` });
+    emit('route_discovery_completed', { stage: 'discovering_routes', status: 'passed', totalPages: Math.min(queue.length, maxPages), message: `Sidebar loaded first; ${Math.min(queue.length, maxPages)} unique routes queued. Starting audits now.` });
     while (queue.length && pages.length < maxPages) {
       if (cancelled) break;
       const next = queue.shift();
@@ -429,7 +434,7 @@ export default async function handler(request, response) {
       emit('page_started', { stage: 'page_audit', status: 'testing', pageIndex, totalPages, url: safe.href, progress: Math.round(((pageIndex - 1) / totalPages) * 100), message: `Testing page ${pageIndex} of ${totalPages}: ${safe.pathname}` });
       let result;
       try {
-        result = await auditPage(page, safe.href, (type, data) => emit(type, { stage: 'page_audit', pageIndex, totalPages, url: safe.href, ...data }), workflowConfig, testDataIdentifier, pageIndex === 1);
+        result = await auditPage(page, safe.href, (type, data) => emit(type, { stage: 'page_audit', pageIndex, totalPages, url: safe.href, ...data }), workflowConfig, testDataIdentifier, false);
       } catch (error) {
         result = {
           url: safe.href, title: safe.pathname, status: null, durationMs: 0, links: [], apiCalls: [], actions: [], features: [], validationIssues: [],
