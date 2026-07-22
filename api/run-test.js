@@ -71,15 +71,30 @@ async function login(page, loginConfig, origin) {
 
 async function auditPage(page, targetUrl) {
   const started = Date.now();
-  const consoleErrors = []; const pageErrors = []; const failedRequests = [];
+  const consoleErrors = []; const pageErrors = []; const failedRequests = []; const apiCalls = [];
   const onConsole = message => { if (message.type() === 'error') consoleErrors.push(message.text().slice(0, 500)); };
   const onPageError = error => pageErrors.push(error.message.slice(0, 500));
   const onRequestFailed = request => failedRequests.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText || 'failed'}`);
-  page.on('console', onConsole); page.on('pageerror', onPageError); page.on('requestfailed', onRequestFailed);
+  const onResponse = response => {
+    const request = response.request();
+    if (['fetch', 'xhr'].includes(request.resourceType()) && apiCalls.length < 100) {
+      apiCalls.push({ method: request.method(), url: response.url(), status: response.status(), ok: response.ok() });
+    }
+  };
+  page.on('console', onConsole); page.on('pageerror', onPageError); page.on('requestfailed', onRequestFailed); page.on('response', onResponse);
   let response;
   try {
     response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    const menuTriggers = page.locator('[aria-haspopup="menu"], button[aria-controls], [role="button"][aria-controls], summary');
+    const triggerCount = Math.min(await menuTriggers.count(), 20);
+    for (let index = 0; index < triggerCount; index += 1) {
+      const trigger = menuTriggers.nth(index);
+      if (!await trigger.isVisible().catch(() => false)) continue;
+      await trigger.hover().catch(() => {});
+      const expanded = await trigger.getAttribute('aria-expanded');
+      if (expanded !== 'true') await trigger.click({ timeout: 1500 }).catch(() => {});
+    }
     const facts = await page.evaluate(() => {
       const visible = element => Boolean(element.getClientRects().length);
       const images = [...document.images];
@@ -118,15 +133,17 @@ async function auditPage(page, targetUrl) {
       ['No console errors', consoleErrors.length === 0, `${consoleErrors.length} console error(s)`, 'warning'],
       ['No failed network requests', failedRequests.length === 0, `${failedRequests.length} failed request(s)`, 'failed']
     ].map(([name, passed, detail, severity]) => ({ name, passed, detail, severity }));
-    const links = await page.locator('a[href]').evaluateAll((anchors, base) => anchors
-      .map(anchor => { try { return new URL(anchor.getAttribute('href'), base).href; } catch { return null; } })
+    const links = await page.locator('a[href], [role="menuitem"][href], option[value], [data-href]').evaluateAll((elements, base) => elements
+      .map(element => element.getAttribute('href') || element.getAttribute('data-href') || element.getAttribute('value'))
+      .filter(value => value && (/^(https?:|\/|\.\.\/|\.\/)/i.test(value)))
+      .map(value => { try { return new URL(value, base).href; } catch { return null; } })
       .filter(Boolean), targetUrl);
     return {
       url: page.url(), title: facts.title, status: response?.status() ?? null, durationMs: Date.now() - started,
-      checks, facts, consoleErrors, pageErrors, failedRequests: failedRequests.slice(0, 20), links
+      checks, facts, consoleErrors, pageErrors, failedRequests: failedRequests.slice(0, 20), apiCalls, links
     };
   } finally {
-    page.off('console', onConsole); page.off('pageerror', onPageError); page.off('requestfailed', onRequestFailed);
+    page.off('console', onConsole); page.off('pageerror', onPageError); page.off('requestfailed', onRequestFailed); page.off('response', onResponse);
   }
 }
 
@@ -177,6 +194,7 @@ export default async function handler(request, response) {
     }
     if (!startingUrls.includes(target.href)) startingUrls.push(target.href);
     const queue = [...startingUrls]; const queued = new Set(queue); const visited = new Set(); const pages = [];
+    const linkOccurrences = new Map();
     for (const raw of [...requestedUrls, ...discoveredUrls]) {
       const candidate = crawlCandidate(raw, target.origin);
       if (candidate && !queued.has(candidate.href)) {
@@ -192,6 +210,10 @@ export default async function handler(request, response) {
       pages.push(result);
       for (const link of result.links) {
         const candidate = crawlCandidate(link, target.origin);
+        if (candidate) {
+          const occurrence = linkOccurrences.get(candidate.href) || { count: 0, pages: new Set() };
+          occurrence.count += 1; occurrence.pages.add(result.url); linkOccurrences.set(candidate.href, occurrence);
+        }
         if (candidate && !queued.has(candidate.href)) {
           queue.push(candidate.href); queued.add(candidate.href);
         }
@@ -199,12 +221,22 @@ export default async function handler(request, response) {
     }
     clearTimeout(timeout);
     const checks = pages.flatMap(item => item.checks);
+    const duplicateUrls = [...linkOccurrences.entries()]
+      .filter(([, occurrence]) => occurrence.count > 1)
+      .map(([url, occurrence]) => ({ url, occurrences: occurrence.count, foundOn: [...occurrence.pages] }));
+    const criticalIssues = pages.flatMap(item => item.checks
+      .filter(check => !check.passed && check.severity === 'critical')
+      .map(check => ({ page: item.url, issue: check.name, detail: check.detail })));
+    const apiIssues = pages.flatMap(item => item.apiCalls
+      .filter(call => !call.ok)
+      .map(call => ({ page: item.url, ...call })));
     const report = {
       id: `run-${Date.now()}`, target: target.origin, startedAt: new Date().toISOString(),
       login: loginResult, pagesScanned: pages.length, passed: checks.filter(item => item.passed).length,
       warnings: checks.filter(item => !item.passed && item.severity === 'warning').length,
       failed: checks.filter(item => !item.passed && item.severity === 'failed').length,
-      critical: checks.filter(item => !item.passed && item.severity === 'critical').length, pages
+      critical: checks.filter(item => !item.passed && item.severity === 'critical').length,
+      criticalIssues, apiIssues, duplicateUrls, pages
     };
     return response.status(200).json(report);
   } catch (error) {
