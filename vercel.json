@@ -3,6 +3,7 @@
   "buildCommand": "npm run build",
   "outputDirectory": "public",
   "cleanUrls": true,
+  "rewrites": [{ "source": "/audit/:runId", "destination": "/index.html" }],
   "functions": {
     "api/run-test.js": { "maxDuration": 300, "memory": 2048 }
   }

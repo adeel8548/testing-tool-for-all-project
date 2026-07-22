@@ -1,20 +1,61 @@
-<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Run safe automated browser audits against your public test application."><title>Testing Tool for All</title><link rel="stylesheet" href="/styles.css"><style>textarea{width:100%;border:1px solid var(--line);border-radius:.6rem;background:#07100d;color:var(--text);padding:.8rem;font:inherit}textarea:focus{outline:3px solid rgba(101,230,168,.35);border-color:var(--green);outline-offset:2px}</style></head>
-<body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="/"><span>✓</span> Testing Tool for All</a><div id="worker-status" class="pill">Checking worker…</div></header>
-<main id="main"><section class="hero"><p class="eyebrow">LIVE WEB QUALITY AUDITOR</p><h1>Test any public web project.</h1><p>Enter a staging or live URL. The secure browser worker discovers same-origin pages, audits real application behavior, and returns an actionable report.</p></section>
-<div class="layout"><form id="test-form" class="panel" autocomplete="off"><div class="panel-head"><div><p class="eyebrow">NEW TEST RUN</p><h2>Target configuration</h2></div><span class="required">* Required</span></div>
-<label>Platform access key *<input id="access-key" name="accessKey" type="password" required autocomplete="off" placeholder="Configured in Vercel"></label>
-<label>Application URL *<input id="target-url" name="targetUrl" type="url" required placeholder="https://staging.example.com"></label>
-<label>Maximum pages<select id="max-pages" name="maxPages"><option>1</option><option selected>5</option><option>10</option><option>25</option></select></label>
-<label>Additional page paths (optional)<textarea id="page-paths" name="pagePaths" rows="3" placeholder="/about&#10;/pricing&#10;/contact"></textarea></label>
-<details><summary>Authenticated login (optional)</summary><div class="details-grid">
-<label>Login URL<input id="login-url" name="loginUrl" type="url" placeholder="https://staging.example.com/login"></label>
-<label>Email or username<input id="login-identifier" name="loginIdentifier" type="text" autocomplete="off"></label>
-<label>Test password<input id="password" name="password" type="password" autocomplete="off"></label>
-<label>Email/username CSS selector<input id="identifier-selector" name="identifierSelector" placeholder="Auto-detected"></label>
-<label>Password CSS selector<input id="password-selector" name="passwordSelector" placeholder="Auto-detected"></label>
-<label>Submit CSS selector<input id="submit-selector" name="submitSelector" placeholder="Auto-detected"></label></div></details>
-<div class="notice"><b>Safety:</b> use an isolated test account. Credentials are sent over HTTPS for this run only and are not included in the report or browser storage.</div>
-<button id="run-button" class="primary" type="submit">Run full audit</button><p id="form-status" role="status" aria-live="polite"></p></form>
-<aside class="panel sidebar"><p class="eyebrow">WHAT IS CHECKED</p><h2>Automatic coverage</h2><ul class="coverage"><li>Route discovery and HTTP status</li><li>Optional login flow</li><li>Titles and primary headings</li><li>Broken images and failed requests</li><li>Accessible labels, buttons, and alt text</li><li>Password masking and overflow</li><li>Console and unhandled JavaScript errors</li><li>Cross-page summary</li></ul><div class="local"><h3>Testing localhost?</h3><p>A hosted service cannot reach your laptop’s private network. Run the framework locally:</p><code>npm run test:e2e</code></div></aside></div>
-<section id="results" class="results" hidden aria-labelledby="results-title"><div class="results-head"><div><p class="eyebrow">LATEST RUN</p><h2 id="results-title">Audit report</h2></div><button id="download-report" class="secondary" type="button">Download JSON</button></div><div id="summary" class="summary" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div><div id="page-results"></div></section></main>
-<footer><span>Playwright · Serverless Chromium · TypeScript</span><a href="https://github.com/adeel8548/testing-tool-for-all-project">Source and local runner</a></footer><script src="/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Run authenticated, real-time browser audits against public test applications.">
+  <title>Testing Tool for All</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/live.css">
+  <link rel="stylesheet" href="/workflow.css">
+  <link rel="stylesheet" href="/crud.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header><a class="brand" href="/"><span>✓</span> Testing Tool for All</a><div id="worker-status" class="pill">Checking worker…</div></header>
+  <main id="main">
+    <section id="setup-screen">
+      <section class="hero"><p class="eyebrow">LIVE WEB QUALITY AUDITOR</p><h1>Test the whole journey.</h1><p>Authenticate once, discover internal routes, watch every real check execute, and receive a route-by-route report.</p></section>
+      <div class="layout">
+        <form id="test-form" class="panel" autocomplete="off">
+          <div class="panel-head"><div><p class="eyebrow">NEW TEST RUN</p><h2>Target configuration</h2></div><span class="required">* Required</span></div>
+          <label>Platform access key *<input id="access-key" name="accessKey" type="password" required autocomplete="off" placeholder="Configured in Vercel"></label>
+          <label>Application URL *<input id="target-url" name="targetUrl" type="url" required placeholder="https://staging.example.com"></label>
+          <label>Maximum pages<select id="max-pages" name="maxPages"><option>1</option><option selected>5</option><option>10</option><option>25</option></select></label>
+          <fieldset><legend>Testing depth</legend><label class="radio-row"><input type="radio" name="testingDepth" value="basic"> Basic page audit</label><label class="radio-row"><input type="radio" name="testingDepth" value="functional"> Functional interactions</label><label class="radio-row"><input type="radio" name="testingDepth" value="full-crud" checked> Full safe CRUD test</label></fieldset>
+          <fieldset><legend>Data safety</legend><label class="radio-row"><input type="radio" name="dataSafety" value="generated-only" checked> Create and modify only audit-generated records</label><label class="radio-row"><input type="radio" name="dataSafety" value="read-only"> Read-only</label><label class="radio-row"><input type="radio" name="dataSafety" value="disposable"> Dedicated disposable environment</label></fieldset>
+          <label>Test data prefix<input id="test-data-prefix" name="testDataPrefix" value="AUTO_TEST" pattern="[A-Za-z0-9_-]{3,32}" maxlength="32" required><small id="test-data-preview" class="muted">AUTO_TEST_customer_20260722_114501</small></label>
+          <div id="mode-warning" class="notice warning-notice"><b>Data-changing mode:</b> only audit-generated records may be changed and every record must be cleaned up. Unconfigured workflows will be skipped. <label class="confirm"><input id="confirm-data" type="checkbox"> I confirm this is an authorized test environment.</label></div>
+          <div class="notice lifecycle"><b>Safe CRUD lifecycle</b><span>Create → Verify → Search → Open → Update → Verify → Delete → Verify cleanup</span></div>
+          <label>Additional page paths (optional)<textarea id="page-paths" name="pagePaths" rows="3" placeholder="/about&#10;/pricing&#10;/contact"></textarea></label>
+          <details><summary>Workflow configuration (optional)</summary><p class="muted">Define business-specific allowed actions, test data, expected outcomes, and cleanup. Unconfigured mutations remain skipped.</p><label>Workflow configuration JSON<textarea id="workflow-config" name="workflowConfig" rows="7" placeholder='[{"page":"/users","action":"Add user","allowed":true,"testData":{"name":"AUTO_TEST"},"expectedOutcome":"User appears in list","cleanup":{"method":"DELETE","url":"/api/users/{id}"}}]'></textarea></label></details>
+          <details><summary>Authenticated login (optional)</summary><div class="details-grid">
+            <label>Login URL<input id="login-url" name="loginUrl" type="url" placeholder="https://staging.example.com/login"></label>
+            <label>Email or username<input id="login-identifier" name="loginIdentifier" type="text" autocomplete="off"></label>
+            <label>Test password<input id="password" name="password" type="password" autocomplete="off"></label>
+            <label>Email/username CSS selector<input id="identifier-selector" name="identifierSelector" placeholder="Auto-detected"></label>
+            <label>Password CSS selector<input id="password-selector" name="passwordSelector" placeholder="Auto-detected"></label>
+            <label>Submit CSS selector<input id="submit-selector" name="submitSelector" placeholder="Auto-detected"></label>
+          </div></details>
+          <div class="notice"><b>Safety:</b> credentials remain in this request only and never appear in events or reports. Read-only is the default.</div>
+          <button id="run-button" class="primary" type="submit">Run full audit</button><p id="form-status" role="status" aria-live="polite"></p>
+        </form>
+        <aside class="panel sidebar"><p class="eyebrow">AUTOMATIC COVERAGE</p><h2>Evidence, not animation</h2><ul class="coverage"><li>Authenticated route and submenu discovery</li><li>Live backend progress events</li><li>HTTP, UI, accessibility and API checks</li><li>Safe workflow classification</li><li>Duplicate and unsafe route exclusion</li><li>Route-by-route findings and JSON report</li></ul></aside>
+      </div>
+    </section>
+
+    <section id="audit-screen" class="audit-screen" hidden aria-live="polite">
+      <div class="audit-header panel"><div><p class="eyebrow" id="audit-domain">AUDIT</p><h1 id="audit-title">Preparing audit…</h1><div class="audit-meta"><span id="audit-status" class="pill">Queued</span><span>Started <time id="audit-start">—</time></span><span>Duration <b id="audit-duration">00:00</b></span></div></div><button id="stop-audit" class="danger" type="button">Stop audit</button></div>
+      <section class="panel progress-panel"><div class="panel-head"><div><p class="eyebrow">OVERALL PROGRESS</p><h2 id="stage-label">Queued</h2></div><strong id="progress-percent">0%</strong></div><div class="progress-track" role="progressbar" aria-label="Audit progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="progress-bar"></span></div><div class="live-stats"><div><b id="pages-count">0 / 0</b><span>Pages</span></div><div><b id="live-passed">0</b><span>Passed</span></div><div><b id="live-warnings">0</b><span>Warnings</span></div><div><b id="live-failed">0</b><span>Failed</span></div></div></section>
+      <div class="audit-grid">
+        <section class="panel current-card"><p class="eyebrow">CURRENT PAGE</p><h2 id="current-page-title">Waiting to start</h2><p id="current-page-url" class="url">—</p><p><b id="current-check">No check running</b></p><dl class="workflow-state"><dt>Workflow</dt><dd id="current-workflow">Discovery</dd><dt>Action</dt><dd id="current-action">Waiting</dd><dt>Test data</dt><dd id="test-data-id">Not created</dd><dt>Cleanup</dt><dd id="cleanup-status">Not required</dd></dl><div class="mini-progress"><span id="page-progress"></span></div><small id="page-timing">0 checks complete</small></section>
+        <section class="panel routes-card"><div class="panel-head"><div><p class="eyebrow">DISCOVERED ROUTES</p><h2>Audit queue</h2></div><b id="route-count">0</b></div><div id="route-list" class="route-list"><p class="empty">Routes will appear here.</p></div></section>
+        <section class="panel log-card"><div class="panel-head"><div><p class="eyebrow">LIVE ACTIVITY</p><h2>Execution log</h2></div><label class="auto-scroll"><input id="auto-scroll" type="checkbox" checked> Auto-scroll</label></div><div id="activity-log" class="activity-log"><p class="empty">Waiting for audit events…</p></div></section>
+      </div>
+      <section id="results" class="results" hidden aria-labelledby="results-title"><div class="results-head"><div><p class="eyebrow">FINAL REPORT</p><h2 id="results-title">Audit report</h2></div><button id="download-report" class="secondary" type="button">Download JSON</button></div><div id="summary" class="summary"></div><div id="page-results"></div><details class="panel execution-log"><summary>Audit execution log</summary><div id="final-log"></div></details></section>
+    </section>
+  </main>
+  <footer><span>Playwright · Serverless Chromium · TypeScript</span><a href="https://github.com/adeel8548/testing-tool-for-all-project">Source and local runner</a></footer>
+  <script src="/app.js"></script>
+</body>
+</html>

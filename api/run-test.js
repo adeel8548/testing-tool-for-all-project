@@ -1,6 +1,6 @@
 /* global process, URL, Buffer, setTimeout, clearTimeout, document, CSS, fetch, AbortSignal */
 import { lookup } from 'node:dns/promises';
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import chromiumPack from '@sparticuz/chromium';
 import { chromium } from 'playwright-core';
 
@@ -9,14 +9,37 @@ export const config = { maxDuration: 300 };
 const PRIVATE_V4 = /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
 const PRIVATE_V6 = /^(::1$|::$|fc|fd|fe80)/i;
 const LOGOUT_PATH = /(?:^|\/)(?:logout|log-out|signout|sign-out|logoff|log-off)(?:\/|$)/i;
+const DESTRUCTIVE_PATH = /(?:^|\/)(?:delete|remove|destroy|purge|drop|truncate)(?:\/|$)/i;
+const DOWNLOAD_FILE = /\.(?:zip|exe|dmg|pdf|csv|xlsx?|docx?|pptx?|tar|gz)(?:$|\?)/i;
+const DESTRUCTIVE_ACTION = /\b(delete|remove|archive|reject|deactivate|disable|cancel order|refund)\b/i;
+const DATA_ACTION = /\b(create|add|new|save|submit|edit|update|approve|assign|restore|activate|enable|upload|import)\b/i;
+const SAFE_ACTION = /\b(view|open|search|filter|sort|next|previous|export|download|tab|details?)\b/i;
+
+function classifyAction(label) {
+  if (DESTRUCTIVE_ACTION.test(label)) return 'destructive';
+  if (DATA_ACTION.test(label)) return 'data-changing';
+  if (SAFE_ACTION.test(label)) return 'safe';
+  return 'unknown';
+}
 
 function crawlCandidate(raw, origin) {
   try {
     const candidate = new URL(raw, origin);
     candidate.hash = '';
-    if (candidate.origin !== origin || LOGOUT_PATH.test(candidate.pathname)) return null;
+    if (candidate.pathname.length > 1) candidate.pathname = candidate.pathname.replace(/\/+$/, '');
+    if (candidate.origin !== origin || LOGOUT_PATH.test(candidate.pathname) || DESTRUCTIVE_PATH.test(candidate.pathname) || DOWNLOAD_FILE.test(candidate.href)) return null;
     return candidate;
   } catch { return null; }
+}
+
+function safeObservedUrl(raw) {
+  try {
+    const url = new URL(raw);
+    for (const key of [...url.searchParams.keys()]) {
+      if (/token|secret|password|auth|key|session/i.test(key)) url.searchParams.set(key, '[REDACTED]');
+    }
+    return url.href;
+  } catch { return String(raw).slice(0, 500); }
 }
 
 function authorized(request) {
@@ -50,13 +73,16 @@ function locatorFor(page, kind, configured) {
   return page.locator('input[type="password"], input[autocomplete="current-password"]').first();
 }
 
-async function login(page, loginConfig, origin) {
+async function login(page, loginConfig, origin, emit) {
   const identifier = loginConfig?.identifier || loginConfig?.email;
   if (!identifier || !loginConfig?.password) return { attempted: false };
+  emit('authentication_started', { stage: 'authenticating', message: 'Opening login page' });
   const loginTarget = await safeUrl(loginConfig.url || origin, origin);
   await page.goto(loginTarget.href, { waitUntil: 'domcontentloaded' });
+  const cookiesBefore = await page.context().cookies(loginTarget.href);
   const identifierField = locatorFor(page, 'identifier', loginConfig.identifierSelector || loginConfig.emailSelector);
   const password = locatorFor(page, 'password', loginConfig.passwordSelector);
+  emit('authentication_progress', { stage: 'authenticating', message: 'Login fields detected' });
   await identifierField.fill(identifier);
   await password.fill(loginConfig.password);
   const submit = loginConfig.submitSelector
@@ -66,10 +92,60 @@ async function login(page, loginConfig, origin) {
   await page.waitForURL(url => url.href !== loginTarget.href, { timeout: 12_000 }).catch(() => {});
   await page.waitForLoadState('domcontentloaded').catch(() => {});
   const finalUrl = page.url();
-  return { attempted: true, finalUrl, leftLoginPage: finalUrl !== loginTarget.href };
+  const cookiesAfter = await page.context().cookies(finalUrl);
+  const authCookieAppeared = cookiesAfter.some(cookie => !cookiesBefore.some(before => before.name === cookie.name && before.value === cookie.value));
+  const passwordStillVisible = await password.isVisible().catch(() => false);
+  const loginErrorVisible = await page.locator('[role="alert"], .error, .alert-danger, [data-error]').filter({ visible: true }).count().catch(() => 0);
+  const leftLoginPage = finalUrl !== loginTarget.href || authCookieAppeared || (!passwordStillVisible && loginErrorVisible === 0);
+  emit(leftLoginPage ? 'authentication_succeeded' : 'authentication_failed', {
+    stage: 'authenticating', status: leftLoginPage ? 'passed' : 'failed',
+    message: leftLoginPage ? `Login succeeded; redirected to ${new URL(finalUrl).pathname}` : 'Authentication failed: login page did not redirect'
+  });
+  return { attempted: true, finalUrl, leftLoginPage };
 }
 
-async function auditPage(page, targetUrl) {
+async function visibleRouteCandidates(page, base) {
+  return page.locator('a[href], [role="menuitem"][href], option[value], [data-href]').evaluateAll((elements, currentBase) => elements
+    .map(element => element.getAttribute('href') || element.getAttribute('data-href') || element.getAttribute('value'))
+    .filter(value => value && (/^(https?:|\/|\.\.\/|\.\/)/i.test(value)))
+    .map(value => { try { return new URL(value, currentBase).href; } catch { return null; } })
+    .filter(Boolean), base);
+}
+
+async function discoverMenuRoutes(page, base) {
+  const routes = new Set(await visibleRouteCandidates(page, base));
+  const selector = [
+    '[aria-haspopup="menu"]', 'button[aria-controls]', '[role="button"][aria-controls]',
+    '[data-bs-toggle="dropdown"]', '[data-toggle="dropdown"]', '.dropdown-toggle',
+    '[data-menu-trigger]', 'nav li:has(ul)', '[role="navigation"] li:has(ul)', 'summary'
+  ].join(', ');
+  for (let pass = 0; pass < 2; pass += 1) {
+    const triggers = page.locator(selector);
+    const count = Math.min(await triggers.count(), 30);
+    for (let index = 0; index < count; index += 1) {
+      const trigger = triggers.nth(index);
+      if (!await trigger.isVisible().catch(() => false)) continue;
+      await trigger.hover().catch(() => {});
+      const clickable = await trigger.evaluate(element => {
+        if (element.matches('button,summary,[role="button"]')) return true;
+        if (element.tagName === 'A') {
+          const href = element.getAttribute('href') || '';
+          return !href || href === '#' || href.startsWith('javascript:');
+        }
+        return element.matches('[aria-haspopup],[data-bs-toggle],[data-toggle],.dropdown-toggle,[data-menu-trigger]');
+      })
+        .catch(() => false);
+      if (clickable && await trigger.getAttribute('aria-expanded') !== 'true') {
+        await trigger.click({ timeout: 500 }).catch(() => {});
+      }
+      await page.waitForTimeout(30);
+      for (const route of await visibleRouteCandidates(page, base)) routes.add(route);
+    }
+  }
+  return [...routes];
+}
+
+async function auditPage(page, targetUrl, progress, workflowConfig = [], testDataIdentifier = '') {
   const started = Date.now();
   const consoleErrors = []; const pageErrors = []; const failedRequests = []; const apiCalls = [];
   const onConsole = message => { if (message.type() === 'error') consoleErrors.push(message.text().slice(0, 500)); };
@@ -78,23 +154,18 @@ async function auditPage(page, targetUrl) {
   const onResponse = response => {
     const request = response.request();
     if (['fetch', 'xhr'].includes(request.resourceType()) && apiCalls.length < 100) {
-      apiCalls.push({ method: request.method(), url: response.url(), status: response.status(), ok: response.ok() });
+      apiCalls.push({ method: request.method(), url: safeObservedUrl(response.url()), status: response.status(), ok: response.ok() });
     }
   };
   page.on('console', onConsole); page.on('pageerror', onPageError); page.on('requestfailed', onRequestFailed); page.on('response', onResponse);
   let response;
   try {
+    progress('check_started', { check: 'Page navigation and HTTP response', checkIndex: 1, totalChecks: 12, message: 'Opening page and checking HTTP response' });
     response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    const menuTriggers = page.locator('[aria-haspopup="menu"], button[aria-controls], [role="button"][aria-controls], summary');
-    const triggerCount = Math.min(await menuTriggers.count(), 20);
-    for (let index = 0; index < triggerCount; index += 1) {
-      const trigger = menuTriggers.nth(index);
-      if (!await trigger.isVisible().catch(() => false)) continue;
-      await trigger.hover().catch(() => {});
-      const expanded = await trigger.getAttribute('aria-expanded');
-      if (expanded !== 'true') await trigger.click({ timeout: 1500 }).catch(() => {});
-    }
+    progress('check_started', { check: 'Authenticated route discovery', checkIndex: 2, totalChecks: 12, message: 'Opening navigation menus and discovering routes' });
+    const links = await discoverMenuRoutes(page, targetUrl);
+    progress('check_started', { check: 'DOM, accessibility and functional inspection', checkIndex: 3, totalChecks: 12, message: 'Inspecting page structure, controls, images and workflows' });
     const facts = await page.evaluate(() => {
       const visible = element => Boolean(element.getClientRects().length);
       const images = [...document.images];
@@ -116,9 +187,55 @@ async function auditPage(page, targetUrl) {
         unlabeledControls,
         unnamedButtons,
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
-        passwordFieldsUnmasked: document.querySelectorAll('input[name*="password" i]:not([type="password"])').length
+        passwordFieldsUnmasked: document.querySelectorAll('input[name*="password" i]:not([type="password"])').length,
+        tables: document.querySelectorAll('table,[role="grid"]').length,
+        dialogs: document.querySelectorAll('dialog,[role="dialog"]').length,
+        actions: [...document.querySelectorAll('button,a[href],[role="button"],[role="menuitem"],input[type="submit"]')]
+          .filter(visible)
+          .slice(0, 100)
+          .map(element => ({
+            label: (element.getAttribute('aria-label') || element.textContent || element.getAttribute('value') || '').trim().slice(0, 160),
+            tag: element.tagName.toLowerCase(), href: element.getAttribute('href') || null
+          }))
+          .filter(action => action.label),
+        formDetails: [...document.forms].slice(0, 20).map((form, formIndex) => ({
+          index: formIndex + 1, method: (form.method || 'get').toUpperCase(), action: form.action,
+          fields: [...form.elements].filter(element => element.matches('input,select,textarea')).map(element => ({
+            name: element.getAttribute('name') || element.getAttribute('id') || 'unnamed',
+            type: element.getAttribute('type') || element.tagName.toLowerCase(), required: element.hasAttribute('required'),
+            labelled: Boolean(element.getAttribute('aria-label') || element.getAttribute('aria-labelledby') || element.closest('label') || (element.id && document.querySelector(`label[for="${CSS.escape(element.id)}"]`)))
+          })),
+          hasSubmit: Boolean(form.querySelector('button[type="submit"],input[type="submit"],button:not([type])'))
+        }))
       };
     });
+    const actions = facts.actions.map(action => {
+      const classification = classifyAction(action.label);
+      const pagePath = new URL(targetUrl).pathname;
+      const configuration = workflowConfig.find(item => item && item.allowed === true &&
+        (item.page === pagePath || item.page === targetUrl) && String(item.action || '').toLowerCase() === action.label.toLowerCase());
+      return {
+        ...action, classification, tested: false,
+        configurationProvided: Boolean(configuration),
+        verification: classification === 'safe' ? 'partially_verified' : configuration ? 'configuration_ready' : 'configuration_required',
+        reason: classification === 'safe' ? 'Discovered during read-only inspection; business outcome was not inferred' : configuration ? 'Configuration supplied; an application-specific executor adapter is required' : 'Skipped until a controlled workflow and cleanup method are configured'
+      };
+    });
+    for (const action of actions) progress('workflow_discovered', {
+      action: action.label, classification: action.classification, verification: action.verification,
+      testDataIdentifier, cleanupStatus: action.configurationProvided ? 'Configured, not executed' : 'Not required',
+      status: action.classification === 'safe' ? 'information' : 'warning', message: `${action.label} · ${action.classification} · ${action.verification}`
+    });
+    const validationIssues = facts.formDetails.flatMap(form => [
+      ...form.fields.filter(field => field.required && !field.labelled).map(field => `Form ${form.index}: required field "${field.name}" has no accessible label`),
+      ...(!form.hasSubmit ? [`Form ${form.index}: no explicit submit control detected`] : [])
+    ]);
+    const features = [
+      facts.forms ? `${facts.forms} form(s)` : null,
+      facts.tables ? `${facts.tables} table/grid(s)` : null,
+      facts.dialogs ? `${facts.dialogs} dialog(s)` : null,
+      actions.length ? `${actions.length} visible action(s)` : null
+    ].filter(Boolean);
     const checks = [
       ['HTTP response is successful', Boolean(response && response.status() < 400), `Status ${response?.status() ?? 'unknown'}`, 'critical'],
       ['Document has a title', Boolean(facts.title.trim()), facts.title || 'Missing title', 'warning'],
@@ -133,14 +250,16 @@ async function auditPage(page, targetUrl) {
       ['No console errors', consoleErrors.length === 0, `${consoleErrors.length} console error(s)`, 'warning'],
       ['No failed network requests', failedRequests.length === 0, `${failedRequests.length} failed request(s)`, 'failed']
     ].map(([name, passed, detail, severity]) => ({ name, passed, detail, severity }));
-    const links = await page.locator('a[href], [role="menuitem"][href], option[value], [data-href]').evaluateAll((elements, base) => elements
-      .map(element => element.getAttribute('href') || element.getAttribute('data-href') || element.getAttribute('value'))
-      .filter(value => value && (/^(https?:|\/|\.\.\/|\.\/)/i.test(value)))
-      .map(value => { try { return new URL(value, base).href; } catch { return null; } })
-      .filter(Boolean), targetUrl);
+    for (let index = 0; index < checks.length; index += 1) {
+      const check = checks[index];
+      progress('check_completed', {
+        check: check.name, checkIndex: index + 1, totalChecks: checks.length,
+        status: check.passed ? 'passed' : check.severity, message: check.name, details: { detail: check.detail }
+      });
+    }
     return {
       url: page.url(), title: facts.title, status: response?.status() ?? null, durationMs: Date.now() - started,
-      checks, facts, consoleErrors, pageErrors, failedRequests: failedRequests.slice(0, 20), apiCalls, links
+      checks, facts, features, actions, validationIssues, consoleErrors, pageErrors, failedRequests: failedRequests.slice(0, 20), apiCalls, links
     };
   } finally {
     page.off('console', onConsole); page.off('pageerror', onPageError); page.off('requestfailed', onRequestFailed); page.off('response', onResponse);
@@ -167,13 +286,45 @@ export default async function handler(request, response) {
   if (!process.env.PLATFORM_ACCESS_KEY) return response.status(503).json({ error: 'Platform access key is not configured.' });
   if (!authorized(request)) return response.status(401).json({ error: 'Invalid platform access key.' });
 
+  let body; let target;
+  try {
+    body = typeof request.body === 'string' ? JSON.parse(request.body) : request.body;
+    target = await safeUrl(body?.targetUrl);
+  } catch (error) {
+    return response.status(400).json({ error: error instanceof Error ? error.message : 'Invalid audit request.' });
+  }
+  const runId = `audit_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+  const auditStartedAt = new Date();
+  let eventId = 0; let cancelled = false; let timedOut = false;
+  response.statusCode = 200;
+  response.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.flushHeaders?.();
+  const emit = (type, data = {}) => {
+    if (response.destroyed || response.writableEnded) return;
+    response.write(`${JSON.stringify({ id: ++eventId, runId, timestamp: new Date().toISOString(), type, ...data })}\n`);
+  };
+  response.on('close', () => { if (!response.writableEnded) cancelled = true; });
+  emit('audit_created', { stage: 'queued', status: 'queued', message: 'Audit run created', target: target.origin });
+
   let browser;
   try {
-    const body = typeof request.body === 'string' ? JSON.parse(request.body) : request.body;
-    const target = await safeUrl(body?.targetUrl);
     const maxPages = Math.min(Math.max(Number(body?.maxPages) || 5, 1), 25);
+    const testingDepth = ['basic', 'functional', 'full-crud'].includes(body?.testingDepth) ? body.testingDepth : 'basic';
+    const dataSafety = ['generated-only', 'read-only', 'disposable'].includes(body?.dataSafety) ? body.dataSafety : 'read-only';
+    const testingMode = testingDepth !== 'full-crud' || dataSafety === 'read-only' ? 'read-only' : dataSafety === 'disposable' ? 'full-staging' : 'safe-crud';
+    const testDataPrefix = /^[A-Za-z0-9_-]{3,32}$/.test(body?.testDataPrefix || '') ? body.testDataPrefix : 'AUTO_TEST';
+    const workflowConfig = Array.isArray(body?.workflowConfig) ? body.workflowConfig.slice(0, 50) : [];
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').slice(0, 15);
+    const testDataIdentifier = `${testDataPrefix}_customer_${stamp}`;
+    if (testingMode !== 'read-only' && !body?.confirmDataChanges) throw new Error('Data-changing test modes require explicit confirmation.');
     if (body?.login?.url) await safeUrl(body.login.url, target.origin);
-    const timeout = setTimeout(() => browser?.close().catch(() => {}), 270_000);
+    const timeout = setTimeout(() => { timedOut = true; browser?.close().catch(() => {}); }, 270_000);
+    emit('audit_started', { stage: 'starting', status: 'starting', message: 'Launching isolated browser', details: { testingDepth, dataSafety, testingMode, testDataIdentifier, maxPages } });
+    if (testingMode !== 'read-only') emit('warning', {
+      stage: 'starting', status: 'warning',
+      message: `${testingMode} selected; unconfigured data-changing workflows will be discovered but skipped for safety`
+    });
     const executablePath = process.env.VERCEL ? await chromiumPack.executablePath() : undefined;
     browser = await chromium.launch({
       args: process.env.VERCEL ? chromiumPack.args : [], executablePath,
@@ -182,8 +333,9 @@ export default async function handler(request, response) {
     const context = await browser.newContext({ ignoreHTTPSErrors: false, viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
     page.setDefaultTimeout(12_000); page.setDefaultNavigationTimeout(25_000);
-    const loginResult = await login(page, body.login, target.origin);
+    const loginResult = await login(page, body.login, target.origin, emit);
 
+    emit('route_discovery_started', { stage: 'discovering_routes', status: 'running', message: 'Discovering authenticated internal routes' });
     const requestedUrls = Array.isArray(body?.pageUrls) ? body.pageUrls.slice(0, maxPages) : [];
     const discoveredUrls = await sitemapUrls(target, maxPages);
     const startingUrls = [];
@@ -195,18 +347,35 @@ export default async function handler(request, response) {
     if (!startingUrls.includes(target.href)) startingUrls.push(target.href);
     const queue = [...startingUrls]; const queued = new Set(queue); const visited = new Set(); const pages = [];
     const linkOccurrences = new Map();
+    for (const url of startingUrls) emit('route_discovered', { stage: 'discovering_routes', status: 'waiting', url, message: `Route discovered: ${new URL(url).pathname}` });
     for (const raw of [...requestedUrls, ...discoveredUrls]) {
       const candidate = crawlCandidate(raw, target.origin);
       if (candidate && !queued.has(candidate.href)) {
         queue.push(candidate.href); queued.add(candidate.href);
+        emit('route_discovered', { stage: 'discovering_routes', status: 'waiting', url: candidate.href, message: `Route discovered: ${candidate.pathname}` });
       }
     }
+    emit('route_discovery_completed', { stage: 'discovering_routes', status: 'passed', totalPages: Math.min(queue.length, maxPages), message: `${Math.min(queue.length, maxPages)} unique routes ready` });
     while (queue.length && pages.length < maxPages) {
+      if (cancelled) break;
       const next = queue.shift();
       if (!next || visited.has(next)) continue;
       const safe = await safeUrl(next, target.origin);
       visited.add(safe.href);
-      const result = await auditPage(page, safe.href);
+      const pageIndex = pages.length + 1;
+      const totalPages = Math.min(Math.max(queued.size, pageIndex), maxPages);
+      emit('page_started', { stage: 'page_audit', status: 'testing', pageIndex, totalPages, url: safe.href, progress: Math.round(((pageIndex - 1) / totalPages) * 100), message: `Testing page ${pageIndex} of ${totalPages}: ${safe.pathname}` });
+      let result;
+      try {
+        result = await auditPage(page, safe.href, (type, data) => emit(type, { stage: 'page_audit', pageIndex, totalPages, url: safe.href, ...data }), workflowConfig, testDataIdentifier);
+      } catch (error) {
+        result = {
+          url: safe.href, title: safe.pathname, status: null, durationMs: 0, links: [], apiCalls: [], actions: [], features: [], validationIssues: [],
+          checks: [{ name: 'Page audit completed', passed: false, detail: error instanceof Error ? error.message : 'Page failed', severity: 'critical' }],
+          facts: {}, consoleErrors: [], pageErrors: [error instanceof Error ? error.message : 'Page failed'], failedRequests: []
+        };
+        emit('error', { stage: 'page_audit', status: 'failed', pageIndex, totalPages, url: safe.href, message: `Page failed: ${result.pageErrors[0]}` });
+      }
       pages.push(result);
       for (const link of result.links) {
         const candidate = crawlCandidate(link, target.origin);
@@ -216,10 +385,19 @@ export default async function handler(request, response) {
         }
         if (candidate && !queued.has(candidate.href)) {
           queue.push(candidate.href); queued.add(candidate.href);
+          emit('route_discovered', { stage: 'discovering_routes', status: 'waiting', url: candidate.href, totalPages: Math.min(queued.size, maxPages), message: `Route discovered: ${candidate.pathname}` });
         }
       }
+      const pageIssues = result.checks.filter(check => !check.passed).length;
+      emit('page_completed', {
+        stage: 'page_audit', status: pageIssues ? 'issues' : 'passed', pageIndex, totalPages: Math.min(queued.size, maxPages),
+        url: result.url, progress: Math.round((pages.length / Math.min(Math.max(queued.size, pages.length), maxPages)) * 100),
+        message: pageIssues ? `Page completed with ${pageIssues} issue(s)` : 'Page completed successfully'
+      });
     }
     clearTimeout(timeout);
+    if (cancelled) return;
+    if (timedOut) throw new Error('Audit exceeded the hosted 270-second execution window. Partial results were retained in the event stream.');
     const checks = pages.flatMap(item => item.checks);
     const duplicateUrls = [...linkOccurrences.entries()]
       .filter(([, occurrence]) => occurrence.count > 1)
@@ -230,17 +408,34 @@ export default async function handler(request, response) {
     const apiIssues = pages.flatMap(item => item.apiCalls
       .filter(call => !call.ok)
       .map(call => ({ page: item.url, ...call })));
+    const actions = pages.flatMap(item => item.actions || []);
     const report = {
-      id: `run-${Date.now()}`, target: target.origin, startedAt: new Date().toISOString(),
-      login: loginResult, pagesScanned: pages.length, passed: checks.filter(item => item.passed).length,
+      id: `run-${Date.now()}`, target: target.origin, startedAt: auditStartedAt.toISOString(), completedAt: new Date().toISOString(),
+      durationMs: Date.now() - auditStartedAt.getTime(),
+      runId, testingDepth, dataSafety, testingMode, testDataPrefix, login: loginResult, pagesScanned: pages.length, passed: checks.filter(item => item.passed).length,
       warnings: checks.filter(item => !item.passed && item.severity === 'warning').length,
       failed: checks.filter(item => !item.passed && item.severity === 'failed').length,
       critical: checks.filter(item => !item.passed && item.severity === 'critical').length,
+      featuresDiscovered: pages.reduce((sum, item) => sum + (item.features?.length || 0), 0),
+      workflowsFound: actions.filter(action => action.classification !== 'unknown').length,
+      workflowsVerified: actions.filter(action => action.tested).length,
+      skippedUnsafeWorkflows: actions.filter(action => ['data-changing', 'destructive'].includes(action.classification)).length,
+      recordsCreated: 0, recordsUpdated: 0, recordsDeleted: 0, recordsCleaned: 0, cleanupFailures: 0,
+      formValidationFailures: pages.reduce((sum, item) => sum + (item.validationIssues?.length || 0), 0),
+      permissionFailures: 0, apiFailures: apiIssues.length,
+      uiFailures: checks.filter(item => !item.passed && ['failed', 'critical'].includes(item.severity)).length,
+      testDataIdentifier, cleanupRegistry: [],
+      crudLifecycle: ['Create', 'Verify', 'Search', 'Open', 'Update', 'Verify', 'Delete', 'Verify cleanup'],
       criticalIssues, apiIssues, duplicateUrls, pages
     };
-    return response.status(200).json(report);
+    emit('audit_completed', {
+      stage: 'completed', status: report.critical || report.failed ? 'completed_with_issues' : 'completed', progress: 100,
+      message: `Audit completed: ${pages.length} page(s) scanned`, report
+    });
+    response.end();
   } catch (error) {
-    return response.status(400).json({ error: error instanceof Error ? error.message : 'Test run failed.' });
+    emit('audit_failed', { stage: 'failed', status: 'failed', message: error instanceof Error ? error.message : 'Test run failed.' });
+    response.end();
   } finally {
     if (browser) await browser.close().catch(() => {});
   }

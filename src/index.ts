@@ -1,4 +1,5 @@
 export * from './browser/page-audit.js';
+export * from './domain/audit-run.js';
 export * from './browser/quality-monitor.js';
 export * from './config/environment.js';
 export * from './data/factories.js';
