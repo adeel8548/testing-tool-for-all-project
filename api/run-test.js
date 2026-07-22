@@ -105,10 +105,11 @@ async function login(page, loginConfig, origin, emit) {
 }
 
 async function visibleRouteCandidates(page, base) {
-  return page.locator('a[href], [role="menuitem"], option[value], [data-href], [data-url], [data-route], [data-path], [to], [onclick]').evaluateAll((elements, currentBase) => elements
+  const domRoutes = await page.locator('a[href], [role="menuitem"], option[value], [data-href], [data-url], [data-route], [data-path], [to], [routerlink], [ng-reflect-router-link], [onclick]').evaluateAll((elements, currentBase) => elements
     .map(element => {
       const direct = element.getAttribute('href') || element.getAttribute('data-href') || element.getAttribute('data-url') ||
-        element.getAttribute('data-route') || element.getAttribute('data-path') || element.getAttribute('to') || element.getAttribute('value');
+        element.getAttribute('data-route') || element.getAttribute('data-path') || element.getAttribute('to') ||
+        element.getAttribute('routerlink') || element.getAttribute('ng-reflect-router-link') || element.getAttribute('value');
       if (direct) return direct;
       const handler = element.getAttribute('onclick') || '';
       return handler.match(/(?:router\.(?:push|replace)|navigate|location(?:\.href)?\s*=)\s*\(?\s*['"]([^'"]+)['"]/i)?.[1] || null;
@@ -116,6 +117,38 @@ async function visibleRouteCandidates(page, base) {
     .filter(value => value && (/^(https?:|\/|\.\.\/|\.\/)/i.test(value)))
     .map(value => { try { return new URL(value, currentBase).href; } catch { return null; } })
     .filter(Boolean), base);
+  const frameworkRoutes = await page.evaluate(currentBase => {
+    const found = new Set(); const routeKey = /^(?:href|to|url|path|route|pathname|navigateTo|routerLink)$/i;
+    const add = value => {
+      if (typeof value !== 'string') return;
+      const candidate = value.trim();
+      if (!/^(https?:|\/|\.\.\/|\.\/)/i.test(candidate) || candidate.startsWith('//') || candidate.length > 500 || /\s/.test(candidate)) return;
+      try { found.add(new URL(candidate, currentBase).href); } catch { /* ignore non-URL component props */ }
+    };
+    const walk = (value, key, depth, seen) => {
+      if (depth > 4 || value == null) return;
+      if (typeof value === 'string') { if (routeKey.test(key) || value.startsWith('/')) add(value); return; }
+      if (typeof value === 'function') {
+        const source = Function.prototype.toString.call(value);
+        for (const match of source.matchAll(/['"](\/[A-Za-z0-9_?=&%#./:-]+)['"]/g)) add(match[1]);
+        return;
+      }
+      if (typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+      const entries = Array.isArray(value) ? value.slice(0, 100).map((item, index) => [String(index), item]) : Object.entries(value).slice(0, 150);
+      for (const [childKey, child] of entries) walk(child, childKey, depth + 1, seen);
+    };
+    const elements = [...document.querySelectorAll('nav *,aside *,[role="navigation"] *,[role="menu"] *,[class*="sidebar" i] *,[class*="menu" i] *')].slice(0, 5000);
+    for (const element of elements) {
+      for (const attribute of element.attributes) if (/href|url|route|path|to|router/i.test(attribute.name)) add(attribute.value);
+      const internalKey = Object.keys(element).find(key => key.startsWith('__reactProps$') || key.startsWith('__reactFiber$'));
+      if (!internalKey) continue;
+      const internal = element[internalKey];
+      walk(internal?.memoizedProps || internal?.pendingProps || internal, 'props', 0, new WeakSet());
+    }
+    return [...found];
+  }, base).catch(() => []);
+  return [...new Set([...domRoutes, ...frameworkRoutes])];
 }
 
 export async function discoverMenuRoutes(page, base, progress, deepDiscovery = true) {

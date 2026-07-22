@@ -18,6 +18,9 @@ test('recursively discovers lazy nested navigation and skips destructive control
           nested.currentTarget.setAttribute('aria-expanded', 'true');
           const second = document.querySelector('#level-two'); second.hidden = false;
           second.innerHTML = '<a href="/analytics/regional-performance">Regional Performance</a><a data-route="/analytics/sku-availability">SKU Availability</a>';
+          const reactItem = document.createElement('div'); reactItem.textContent = 'Action Center'; reactItem.setAttribute('role', 'menuitem');
+          reactItem['__reactProps$test'] = { onClick: () => window.history.pushState({}, '', '/analytics/action-center'), to: '/analytics/action-center' };
+          second.append(reactItem);
         };
       };
     </script>
@@ -27,7 +30,8 @@ test('recursively discovers lazy nested navigation and skips destructive control
   expect(routes).toEqual(expect.arrayContaining([
     'https://target.example/dashboard',
     'https://target.example/analytics/regional-performance',
-    'https://target.example/analytics/sku-availability'
+    'https://target.example/analytics/sku-availability',
+    'https://target.example/analytics/action-center'
   ]));
   expect(await page.evaluate(() => (window as typeof window & { deleteClicked: boolean }).deleteClicked)).toBe(false);
   expect(messages.some(message => message.includes('Expanding Analytics'))).toBe(true);
