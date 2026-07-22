@@ -31,7 +31,8 @@ form.addEventListener('submit', async event => {
   event.preventDefault(); button.disabled = true; results.hidden = true; status.className = '';
   status.textContent = 'Starting isolated browser… this can take up to a few minutes.';
   const value = id => document.querySelector(`#${id}`).value.trim();
-  const payload = { targetUrl: value('target-url'), maxPages: Number(value('max-pages')) };
+  const pageUrls = value('page-paths').split(/[\n,]+/).map(item => item.trim()).filter(Boolean);
+  const payload = { targetUrl: value('target-url'), maxPages: Number(value('max-pages')), pageUrls };
   if (value('login-identifier') || value('password')) payload.login = {
     url: value('login-url'), identifier: value('login-identifier'), password: value('password'),
     identifierSelector: value('identifier-selector'), passwordSelector: value('password-selector'), submitSelector: value('submit-selector')

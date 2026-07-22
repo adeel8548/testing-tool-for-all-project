@@ -1,10 +1,11 @@
-<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Run safe automated browser audits against your public test application."><title>Testing Tool for All</title><link rel="stylesheet" href="/styles.css"></head>
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Run safe automated browser audits against your public test application."><title>Testing Tool for All</title><link rel="stylesheet" href="/styles.css"><style>textarea{width:100%;border:1px solid var(--line);border-radius:.6rem;background:#07100d;color:var(--text);padding:.8rem;font:inherit}textarea:focus{outline:3px solid rgba(101,230,168,.35);border-color:var(--green);outline-offset:2px}</style></head>
 <body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="/"><span>✓</span> Testing Tool for All</a><div id="worker-status" class="pill">Checking worker…</div></header>
 <main id="main"><section class="hero"><p class="eyebrow">LIVE WEB QUALITY AUDITOR</p><h1>Test any public web project.</h1><p>Enter a staging or live URL. The secure browser worker discovers same-origin pages, audits real application behavior, and returns an actionable report.</p></section>
 <div class="layout"><form id="test-form" class="panel" autocomplete="off"><div class="panel-head"><div><p class="eyebrow">NEW TEST RUN</p><h2>Target configuration</h2></div><span class="required">* Required</span></div>
 <label>Platform access key *<input id="access-key" name="accessKey" type="password" required autocomplete="off" placeholder="Configured in Vercel"></label>
 <label>Application URL *<input id="target-url" name="targetUrl" type="url" required placeholder="https://staging.example.com"></label>
 <label>Maximum pages<select id="max-pages" name="maxPages"><option>1</option><option selected>5</option><option>10</option><option>25</option></select></label>
+<label>Additional page paths (optional)<textarea id="page-paths" name="pagePaths" rows="3" placeholder="/about&#10;/pricing&#10;/contact"></textarea></label>
 <details><summary>Authenticated login (optional)</summary><div class="details-grid">
 <label>Login URL<input id="login-url" name="loginUrl" type="url" placeholder="https://staging.example.com/login"></label>
 <label>Email or username<input id="login-identifier" name="loginIdentifier" type="text" autocomplete="off"></label>

@@ -1,4 +1,4 @@
-/* global process, URL, Buffer, setTimeout, clearTimeout, document, CSS */
+/* global process, URL, Buffer, setTimeout, clearTimeout, document, CSS, fetch, AbortSignal */
 import { lookup } from 'node:dns/promises';
 import { timingSafeEqual } from 'node:crypto';
 import chromiumPack from '@sparticuz/chromium';
@@ -117,6 +117,20 @@ async function auditPage(page, targetUrl) {
   }
 }
 
+async function sitemapUrls(target, limit) {
+  try {
+    const sitemap = await safeUrl(new URL('/sitemap.xml', target.origin).href, target.origin);
+    const response = await fetch(sitemap, { signal: AbortSignal.timeout(8000), headers: { accept: 'application/xml,text/xml' } });
+    if (!response.ok) return [];
+    await safeUrl(response.url, target.origin);
+    const xml = (await response.text()).slice(0, 2_000_000);
+    return [...xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)]
+      .map(match => match[1].replaceAll('&amp;', '&').trim())
+      .filter(Boolean)
+      .slice(0, limit);
+  } catch { return []; }
+}
+
 export default async function handler(request, response) {
   response.setHeader('Cache-Control', 'no-store');
   if (request.method !== 'POST') return response.status(405).json({ error: 'Use POST.' });
@@ -140,7 +154,17 @@ export default async function handler(request, response) {
     page.setDefaultTimeout(12_000); page.setDefaultNavigationTimeout(25_000);
     const loginResult = await login(page, body.login, target.origin);
 
-    const queue = [target.href]; const visited = new Set(); const pages = [];
+    const requestedUrls = Array.isArray(body?.pageUrls) ? body.pageUrls.slice(0, maxPages) : [];
+    const discoveredUrls = await sitemapUrls(target, maxPages);
+    const queue = [target.href]; const queued = new Set(queue); const visited = new Set(); const pages = [];
+    for (const raw of [...requestedUrls, ...discoveredUrls]) {
+      try {
+        const candidate = new URL(raw, target.origin); candidate.hash = '';
+        if (candidate.origin === target.origin && !queued.has(candidate.href)) {
+          queue.push(candidate.href); queued.add(candidate.href);
+        }
+      } catch { /* ignore malformed configured or sitemap URLs */ }
+    }
     while (queue.length && pages.length < maxPages) {
       const next = queue.shift();
       if (!next || visited.has(next)) continue;
@@ -152,7 +176,9 @@ export default async function handler(request, response) {
         try {
           const candidate = new URL(link);
           candidate.hash = '';
-          if (candidate.origin === target.origin && !visited.has(candidate.href)) queue.push(candidate.href);
+          if (candidate.origin === target.origin && !queued.has(candidate.href)) {
+            queue.push(candidate.href); queued.add(candidate.href);
+          }
         } catch { /* ignore malformed links discovered in page markup */ }
       }
     }
