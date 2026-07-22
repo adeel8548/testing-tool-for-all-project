@@ -105,47 +105,99 @@ async function login(page, loginConfig, origin, emit) {
 }
 
 async function visibleRouteCandidates(page, base) {
-  return page.locator('a[href], [role="menuitem"][href], option[value], [data-href]').evaluateAll((elements, currentBase) => elements
-    .map(element => element.getAttribute('href') || element.getAttribute('data-href') || element.getAttribute('value'))
+  return page.locator('a[href], [role="menuitem"], option[value], [data-href], [data-url], [data-route], [data-path], [to], [onclick]').evaluateAll((elements, currentBase) => elements
+    .map(element => {
+      const direct = element.getAttribute('href') || element.getAttribute('data-href') || element.getAttribute('data-url') ||
+        element.getAttribute('data-route') || element.getAttribute('data-path') || element.getAttribute('to') || element.getAttribute('value');
+      if (direct) return direct;
+      const handler = element.getAttribute('onclick') || '';
+      return handler.match(/(?:router\.(?:push|replace)|navigate|location(?:\.href)?\s*=)\s*\(?\s*['"]([^'"]+)['"]/i)?.[1] || null;
+    })
     .filter(value => value && (/^(https?:|\/|\.\.\/|\.\/)/i.test(value)))
     .map(value => { try { return new URL(value, currentBase).href; } catch { return null; } })
     .filter(Boolean), base);
 }
 
-async function discoverMenuRoutes(page, base) {
+export async function discoverMenuRoutes(page, base, progress, deepDiscovery = true) {
   const routes = new Set(await visibleRouteCandidates(page, base));
+  if (!deepDiscovery) return [...routes];
   const selector = [
-    '[aria-haspopup="menu"]', 'button[aria-controls]', '[role="button"][aria-controls]',
-    '[data-bs-toggle="dropdown"]', '[data-toggle="dropdown"]', '.dropdown-toggle',
-    '[data-menu-trigger]', 'nav li:has(ul)', '[role="navigation"] li:has(ul)', 'summary'
+    '[aria-expanded]', '[aria-haspopup="menu"]', '[aria-controls]', '[data-state="closed"]',
+    '[data-bs-toggle="dropdown"]', '[data-toggle="dropdown"]', '[data-menu-trigger]',
+    '.dropdown-toggle', '.accordion-header', '.accordion-button', '.submenu-toggle', '.menu-toggle',
+    '.sidebar-toggle', '.navbar-toggler', '.hamburger', '[class*="chevron"]',
+    'nav li:has(ul)', '[role="navigation"] li:has(ul)', '[role="menuitem"]', 'summary'
   ].join(', ');
-  for (let pass = 0; pass < 2; pass += 1) {
+  const unsafe = /\b(log\s*out|sign\s*out|delete|remove|reset|clear data|payment|pay now|approve|reject|archive|deactivate|disable|destroy|purge)\b/i;
+  const marker = `audit-${Date.now()}`; const opened = [];
+  const announceRoutes = async source => {
+    for (const route of await visibleRouteCandidates(page, base)) {
+      if (routes.has(route)) continue;
+      routes.add(route); progress('route_discovered_detail', { status: 'information', discoveredUrl: route, message: `Discovered ${new URL(route).pathname} from ${source}` });
+    }
+  };
+  const hiddenContainers = await page.locator('[hidden], [aria-hidden="true"], [style*="display: none" i], [style*="visibility: hidden" i], .collapse:not(.show), [data-state="closed"]').count();
+  progress('route_discovery_debug', { status: 'information', message: `Found ${hiddenContainers} hidden or collapsed menu container(s)` });
+  for (let depth = 0; depth < 5; depth += 1) {
     const triggers = page.locator(selector);
-    const count = Math.min(await triggers.count(), 30);
+    const count = Math.min(await triggers.count(), 100);
+    progress('route_discovery_debug', { status: 'information', message: `Depth ${depth + 1}: found ${count} possible expander(s)` });
+    let expandedAtDepth = 0;
     for (let index = 0; index < count; index += 1) {
       const trigger = triggers.nth(index);
       if (!await trigger.isVisible().catch(() => false)) continue;
-      await trigger.hover().catch(() => {});
-      const clickable = await trigger.evaluate(element => {
-        if (element.matches('button,summary,[role="button"]')) return true;
-        if (element.tagName === 'A') {
-          const href = element.getAttribute('href') || '';
-          return !href || href === '#' || href.startsWith('javascript:');
-        }
-        return element.matches('[aria-haspopup],[data-bs-toggle],[data-toggle],.dropdown-toggle,[data-menu-trigger]');
-      })
-        .catch(() => false);
-      if (clickable && await trigger.getAttribute('aria-expanded') !== 'true') {
-        await trigger.click({ timeout: 500 }).catch(() => {});
+      const info = await trigger.evaluate((element, auditMarker) => {
+        if (element.getAttribute('data-audit-route-marker') === auditMarker) return { processed: true };
+        element.setAttribute('data-audit-route-marker', auditMarker);
+        const label = (element.getAttribute('aria-label') || element.textContent || element.getAttribute('title') || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+        const expanded = element.getAttribute('aria-expanded'); const state = element.getAttribute('data-state');
+        const classes = String(element.className || '');
+        const structural = Boolean(element.getAttribute('aria-controls') || element.getAttribute('aria-haspopup') ||
+          element.matches('summary,button,[role="button"]') && (element.nextElementSibling?.matches('ul,menu,nav,[role="menu"],.submenu,.dropdown-menu,.collapse') || element.parentElement?.querySelector(':scope > ul,:scope > menu,:scope > .submenu,:scope > .dropdown-menu')));
+        const semantic = expanded !== null || state === 'closed' || /menu|submenu|dropdown|accordion|nav|sidebar|hamburger|chevron|collapse|expand/i.test(classes);
+        return { processed: false, label: label || 'unnamed control', open: expanded === 'true' || state === 'open', confident: structural || semantic };
+      }, marker).catch(() => ({ processed: true }));
+      if (info.processed) continue;
+      if (unsafe.test(info.label)) { progress('route_discovery_debug', { status: 'warning', message: `Skipped unsafe control: ${info.label}` }); continue; }
+      if (!info.confident) { progress('route_discovery_debug', { status: 'information', message: `Skipped uncertain control: ${info.label}` }); continue; }
+      if (info.open) { await announceRoutes(`open menu ${info.label}`); continue; }
+      progress('route_discovery_debug', { status: 'testing', message: `Expanding ${info.label}` });
+      try {
+        const isListItem = await trigger.evaluate(element => element.tagName === 'LI');
+        const nestedControl = trigger.locator(':scope > button, :scope > summary, :scope > [role="button"], :scope > a[aria-expanded], :scope > a[href="#"]').first();
+        const clickTarget = isListItem && await nestedControl.count() ? nestedControl : trigger;
+        await clickTarget.hover({ timeout: 500 }).catch(() => {});
+        await clickTarget.click({ timeout: 1000 }); opened.push(clickTarget); expandedAtDepth += 1;
+        await page.waitForTimeout(150); await announceRoutes(info.label);
+      } catch (error) {
+        progress('route_discovery_debug', { status: 'warning', message: `Could not expand ${info.label}: ${error instanceof Error ? error.message.split('\n')[0] : 'click failed'}` });
       }
-      await page.waitForTimeout(30);
-      for (const route of await visibleRouteCandidates(page, base)) routes.add(route);
     }
+    if (!expandedAtDepth) break;
   }
+  const clickTargets = page.locator('nav [role="menuitem"]:not([href]), [role="navigation"] [role="menuitem"]:not([href]), nav button[data-url], nav button[data-route], nav button[data-path]');
+  const clickCount = Math.min(await clickTargets.count(), 25);
+  for (let index = 0; index < clickCount; index += 1) {
+    const item = clickTargets.nth(index); const label = (await item.getAttribute('aria-label') || await item.textContent() || '').trim().slice(0, 120);
+    if (!label || unsafe.test(label) || !await item.isVisible().catch(() => false)) continue;
+    const before = page.url();
+    try {
+      await item.click({ timeout: 800 }); await page.waitForTimeout(150);
+      const after = page.url();
+      if (after !== before) {
+        if (!routes.has(after)) { routes.add(after); progress('route_discovered_detail', { status: 'information', discoveredUrl: after, message: `Discovered ${new URL(after).pathname} by safely opening ${label}` }); }
+        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 3000 }).catch(() => page.goto(before, { waitUntil: 'domcontentloaded' }));
+      }
+    } catch (error) { progress('route_discovery_debug', { status: 'warning', message: `Navigation probe failed for ${label}: ${error instanceof Error ? error.message.split('\n')[0] : 'click failed'}` }); }
+  }
+  for (const trigger of opened.reverse()) {
+    if (await trigger.isVisible().catch(() => false) && await trigger.getAttribute('aria-expanded') === 'true') await trigger.click({ timeout: 500 }).catch(() => {});
+  }
+  progress('route_discovery_debug', { status: 'passed', message: `Recursive route discovery completed: ${routes.size} route candidate(s)` });
   return [...routes];
 }
 
-async function auditPage(page, targetUrl, progress, workflowConfig = [], testDataIdentifier = '') {
+async function auditPage(page, targetUrl, progress, workflowConfig = [], testDataIdentifier = '', deepDiscovery = true) {
   const started = Date.now();
   const consoleErrors = []; const pageErrors = []; const failedRequests = []; const apiCalls = [];
   const onConsole = message => { if (message.type() === 'error') consoleErrors.push(message.text().slice(0, 500)); };
@@ -164,7 +216,7 @@ async function auditPage(page, targetUrl, progress, workflowConfig = [], testDat
     response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
     progress('check_started', { check: 'Authenticated route discovery', checkIndex: 2, totalChecks: 12, message: 'Opening navigation menus and discovering routes' });
-    const links = await discoverMenuRoutes(page, targetUrl);
+    const links = await discoverMenuRoutes(page, targetUrl, progress, deepDiscovery);
     const screenshot = await page.screenshot({ type: 'jpeg', quality: 45, fullPage: false }).catch(() => null);
     if (screenshot) progress('page_preview', {
       status: 'information', message: 'Live page preview updated',
@@ -372,7 +424,7 @@ export default async function handler(request, response) {
       emit('page_started', { stage: 'page_audit', status: 'testing', pageIndex, totalPages, url: safe.href, progress: Math.round(((pageIndex - 1) / totalPages) * 100), message: `Testing page ${pageIndex} of ${totalPages}: ${safe.pathname}` });
       let result;
       try {
-        result = await auditPage(page, safe.href, (type, data) => emit(type, { stage: 'page_audit', pageIndex, totalPages, url: safe.href, ...data }), workflowConfig, testDataIdentifier);
+        result = await auditPage(page, safe.href, (type, data) => emit(type, { stage: 'page_audit', pageIndex, totalPages, url: safe.href, ...data }), workflowConfig, testDataIdentifier, pageIndex === 1);
       } catch (error) {
         result = {
           url: safe.href, title: safe.pathname, status: null, durationMs: 0, links: [], apiCalls: [], actions: [], features: [], validationIssues: [],
