@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "cleanUrls": true,
+  "functions": {
+    "api/run-test.js": { "maxDuration": 300, "memory": 2048 }
+  }
+}

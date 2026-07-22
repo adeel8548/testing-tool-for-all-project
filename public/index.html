@@ -1,0 +1,19 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Run safe automated browser audits against your public test application."><title>Testing Tool for All</title><link rel="stylesheet" href="/styles.css"></head>
+<body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="/"><span>✓</span> Testing Tool for All</a><div id="worker-status" class="pill">Checking worker…</div></header>
+<main id="main"><section class="hero"><p class="eyebrow">LIVE WEB QUALITY AUDITOR</p><h1>Test any public web project.</h1><p>Enter a staging or live URL. The secure browser worker discovers same-origin pages, audits real application behavior, and returns an actionable report.</p></section>
+<div class="layout"><form id="test-form" class="panel" autocomplete="off"><div class="panel-head"><div><p class="eyebrow">NEW TEST RUN</p><h2>Target configuration</h2></div><span class="required">* Required</span></div>
+<label>Platform access key *<input id="access-key" name="accessKey" type="password" required autocomplete="off" placeholder="Configured in Vercel"></label>
+<label>Application URL *<input id="target-url" name="targetUrl" type="url" required placeholder="https://staging.example.com"></label>
+<label>Maximum pages<select id="max-pages" name="maxPages"><option>1</option><option selected>5</option><option>10</option></select></label>
+<details><summary>Authenticated login (optional)</summary><div class="details-grid">
+<label>Login URL<input id="login-url" name="loginUrl" type="url" placeholder="https://staging.example.com/login"></label>
+<label>Test email<input id="email" name="email" type="email" autocomplete="off"></label>
+<label>Test password<input id="password" name="password" type="password" autocomplete="off"></label>
+<label>Email CSS selector<input id="email-selector" name="emailSelector" placeholder="Auto-detected"></label>
+<label>Password CSS selector<input id="password-selector" name="passwordSelector" placeholder="Auto-detected"></label>
+<label>Submit CSS selector<input id="submit-selector" name="submitSelector" placeholder="Auto-detected"></label></div></details>
+<div class="notice"><b>Safety:</b> use an isolated test account. Credentials are sent over HTTPS for this run only and are not included in the report or browser storage.</div>
+<button id="run-button" class="primary" type="submit">Run full audit</button><p id="form-status" role="status" aria-live="polite"></p></form>
+<aside class="panel sidebar"><p class="eyebrow">WHAT IS CHECKED</p><h2>Automatic coverage</h2><ul class="coverage"><li>Route discovery and HTTP status</li><li>Optional login flow</li><li>Titles and primary headings</li><li>Broken images and failed requests</li><li>Accessible labels, buttons, and alt text</li><li>Password masking and overflow</li><li>Console and unhandled JavaScript errors</li><li>Cross-page summary</li></ul><div class="local"><h3>Testing localhost?</h3><p>A hosted service cannot reach your laptop’s private network. Run the framework locally:</p><code>npm run test:e2e</code></div></aside></div>
+<section id="results" class="results" hidden aria-labelledby="results-title"><div class="results-head"><div><p class="eyebrow">LATEST RUN</p><h2 id="results-title">Audit report</h2></div><button id="download-report" class="secondary" type="button">Download JSON</button></div><div id="summary" class="summary"></div><div id="page-results"></div></section></main>
+<footer><span>Playwright · Serverless Chromium · TypeScript</span><a href="https://github.com/adeel8548/testing-tool-for-all-project">Source and local runner</a></footer><script src="/app.js"></script></body></html>

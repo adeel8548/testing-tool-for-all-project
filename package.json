@@ -4,7 +4,9 @@
   "private": true,
   "description": "Reusable Playwright and Vitest quality engineering framework for web applications and APIs.",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "playwright test --ui",
     "test": "npm run test:unit && npm run test:e2e",
@@ -34,5 +36,9 @@
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.0.0",
     "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "@sparticuz/chromium": "^149.0.0",
+    "playwright-core": "^1.61.1"
   }
 }

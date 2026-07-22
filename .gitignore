@@ -10,3 +10,5 @@ auth/*.json
 downloads/
 *.log
 .DS_Store
+
+.vercel
