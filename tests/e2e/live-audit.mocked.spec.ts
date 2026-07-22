@@ -45,6 +45,13 @@ test.describe('live audit execution', () => {
     await expect(page.locator('#page-preview')).toBeVisible();
     await expect(page.locator('#activity-log')).not.toContainText('private-password');
     await expect(page).toHaveURL(/\/audit\/audit_test$/);
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Download complete JSON report' }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe('audit_test-complete-audit-report.json');
+    const downloadedReport = JSON.parse(readFileSync((await download.path())!, 'utf8'));
+    expect(JSON.stringify(downloadedReport)).not.toContain('private-password');
+    expect(downloadedReport.auditExecutionLog.length).toBeGreaterThan(0);
   });
 
   test('requires explicit confirmation for a data-changing mode', async ({ page }) => {

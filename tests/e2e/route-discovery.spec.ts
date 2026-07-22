@@ -1,6 +1,14 @@
 import { expect, test } from '@playwright/test';
 // @ts-expect-error The deployed Vercel function is JavaScript and intentionally has no declaration file.
-import { discoverMenuRoutes } from '../../api/run-test.js';
+import { crawlCandidate, discoverMenuRoutes } from '../../api/run-test.js';
+
+test('excludes framework resources and API endpoints from the page audit queue', () => {
+  expect(crawlCandidate('https://target.example/_next/image?url=%2Fimage.png', 'https://target.example')).toBeNull();
+  expect(crawlCandidate('https://target.example/api/users', 'https://target.example')).toBeNull();
+  expect(crawlCandidate('https://target.example/client/planogram', 'https://target.example')).toBeNull();
+  expect(crawlCandidate('https://target.example/images/planogram.png', 'https://target.example')).toBeNull();
+  expect(crawlCandidate('https://target.example/planogram', 'https://target.example')?.pathname).toBe('/planogram');
+});
 
 test('recursively discovers lazy nested navigation and skips destructive controls', async ({ page }) => {
   await page.setContent(`<!doctype html><html><body><nav aria-label="Main navigation">

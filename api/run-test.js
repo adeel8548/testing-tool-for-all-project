@@ -1,4 +1,4 @@
-/* global process, URL, Buffer, setTimeout, clearTimeout, document, CSS, fetch, AbortSignal */
+/* global process, URL, Buffer, setTimeout, clearTimeout, document, CSS, fetch, AbortSignal, getComputedStyle */
 import { lookup } from 'node:dns/promises';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import chromiumPack from '@sparticuz/chromium';
@@ -11,6 +11,8 @@ const PRIVATE_V6 = /^(::1$|::$|fc|fd|fe80)/i;
 const LOGOUT_PATH = /(?:^|\/)(?:logout|log-out|signout|sign-out|logoff|log-off)(?:\/|$)/i;
 const DESTRUCTIVE_PATH = /(?:^|\/)(?:delete|remove|destroy|purge|drop|truncate)(?:\/|$)/i;
 const DOWNLOAD_FILE = /\.(?:zip|exe|dmg|pdf|csv|xlsx?|docx?|pptx?|tar|gz)(?:$|\?)/i;
+const NON_PAGE_PATH = /^\/(?:_next|api|client|static|assets|images|uploads|favicon|robots\.txt|sitemap\.xml)(?:\/|$)/i;
+const RESOURCE_FILE = /\.(?:avif|bmp|css|eot|gif|ico|jpe?g|js|json|map|mjs|mp3|mp4|ogg|otf|png|svg|webm|webp|woff2?|xml)(?:$|\?)/i;
 const DESTRUCTIVE_ACTION = /\b(delete|remove|archive|reject|deactivate|disable|cancel order|refund)\b/i;
 const DATA_ACTION = /\b(create|add|new|save|submit|edit|update|approve|assign|restore|activate|enable|upload|import)\b/i;
 const SAFE_ACTION = /\b(view|open|search|filter|sort|next|previous|export|download|tab|details?)\b/i;
@@ -22,12 +24,27 @@ function classifyAction(label) {
   return 'unknown';
 }
 
-function crawlCandidate(raw, origin) {
+function recommendedFix(type, name = '') {
+  if (type === 'api') return 'Inspect the API handler, authentication/permissions, request payload, and server logs for this status code.';
+  if (type === 'interaction') return 'Ensure the control is visible, enabled, unobstructed, and exposes correct button/link semantics and keyboard access.';
+  if (type === 'validation') return 'Add explicit accessible labels and client/server validation with a clear user-facing error message.';
+  if (type === 'workflow') return 'Provide authorized test data, expected outcome, record identifier, and a verified cleanup method before executing this workflow.';
+  if (/HTTP response/i.test(name)) return 'Fix the page route or server response so navigation returns a successful HTML response.';
+  if (/title|heading/i.test(name)) return 'Add a unique document title and one clear primary heading describing the page.';
+  if (/image/i.test(name)) return 'Correct the image URL/loading behavior and provide meaningful alt attributes.';
+  if (/console|page error/i.test(name)) return 'Trace the browser error to its source module and handle the failing state without an uncaught exception.';
+  if (/network request/i.test(name)) return 'Inspect the failed request URL, CORS, authentication, availability, and response handling.';
+  if (/overflow/i.test(name)) return 'Make the layout responsive and constrain wide content inside an appropriate scroll container.';
+  return 'Review the supplied evidence on this page and correct the underlying UI or application behavior.';
+}
+
+export function crawlCandidate(raw, origin) {
   try {
     const candidate = new URL(raw, origin);
     candidate.hash = '';
     if (candidate.pathname.length > 1) candidate.pathname = candidate.pathname.replace(/\/+$/, '');
-    if (candidate.origin !== origin || LOGOUT_PATH.test(candidate.pathname) || DESTRUCTIVE_PATH.test(candidate.pathname) || DOWNLOAD_FILE.test(candidate.href)) return null;
+    if (candidate.origin !== origin || LOGOUT_PATH.test(candidate.pathname) || DESTRUCTIVE_PATH.test(candidate.pathname) ||
+      NON_PAGE_PATH.test(candidate.pathname) || DOWNLOAD_FILE.test(candidate.href) || RESOURCE_FILE.test(candidate.href)) return null;
     return candidate;
   } catch { return null; }
 }
@@ -40,6 +57,14 @@ function safeObservedUrl(raw) {
     }
     return url.href;
   } catch { return String(raw).slice(0, 500); }
+}
+
+function redactText(value) {
+  return String(value)
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/([?&](?:token|secret|password|auth|key|session)=)[^&\s]+/gi, '$1[REDACTED]')
+    .replace(/(["']?(?:password|token|secret|authorization|cookie)["']?\s*[:=]\s*)["']?[^,"'\s}]+/gi, '$1[REDACTED]')
+    .slice(0, 1000);
 }
 
 function authorized(request) {
@@ -136,7 +161,10 @@ async function visibleRouteCandidates(page, base) {
       if (typeof value !== 'object' || seen.has(value)) return;
       seen.add(value);
       const entries = Array.isArray(value) ? value.slice(0, 100).map((item, index) => [String(index), item]) : Object.entries(value).slice(0, 150);
-      for (const [childKey, child] of entries) walk(child, childKey, depth + 1, seen);
+      for (const [childKey, child] of entries) {
+        if (/^(?:children|src|srcSet|image|images|icon|icons|loader|endpoint|api|queryKey)$/i.test(childKey)) continue;
+        walk(child, childKey, depth + 1, seen);
+      }
     };
     const elements = [...document.querySelectorAll('nav *,aside *,[role="navigation"] *,[role="menu"] *,[class*="sidebar" i] *,[class*="menu" i] *')].slice(0, 5000);
     for (const element of elements) {
@@ -235,12 +263,42 @@ export async function discoverMenuRoutes(page, base, progress, deepDiscovery = t
   return [...routes];
 }
 
+async function inspectInteractionActionability(page, progress) {
+  const locator = page.locator('button,a[href],[role="button"],[role="link"],[role="menuitem"],tbody tr,[data-href],[data-url],[data-route],[data-path]');
+  const count = Math.min(await locator.count(), 80); const interactions = [];
+  progress('interaction_discovery_started', { status: 'testing', message: `Checking actionability of up to ${count} buttons, links, and table rows` });
+  for (let index = 0; index < count; index += 1) {
+    const item = locator.nth(index);
+    if (!await item.isVisible().catch(() => false)) continue;
+    const info = await item.evaluate(element => {
+      const label = (element.getAttribute('aria-label') || element.textContent || element.getAttribute('title') || '').trim().replace(/\s+/g, ' ').slice(0, 160);
+      const tag = element.tagName.toLowerCase(); const role = element.getAttribute('role') || '';
+      const row = tag === 'tr'; const cursor = getComputedStyle(element).cursor;
+      const intendedClickable = !row || role === 'link' || element.hasAttribute('onclick') || element.hasAttribute('tabindex') || cursor === 'pointer' || Boolean(element.querySelector('a,button,[role="button"],[role="link"]'));
+      const keyboardAccessible = ['a', 'button', 'input', 'select', 'textarea'].includes(tag) || role === 'button' || role === 'link' || Number(element.getAttribute('tabindex')) >= 0;
+      return { label: label || `${row ? 'Table row' : 'Control'} ${index + 1}`, tag, role, row, intendedClickable, keyboardAccessible };
+    });
+    if (!info.intendedClickable) continue;
+    let clickable = true; let issue = '';
+    try { await item.click({ trial: true, timeout: 500 }); }
+    catch (error) { clickable = false; issue = error instanceof Error ? error.message.split('\n')[0] : 'Actionability check failed'; }
+    interactions.push({ ...info, classification: classifyAction(info.label), clickable, issue });
+  }
+  const failed = interactions.filter(item => !item.clickable).length;
+  const inaccessibleRows = interactions.filter(item => item.row && !item.keyboardAccessible).length;
+  progress('interaction_discovery_completed', {
+    status: failed || inaccessibleRows ? 'warning' : 'passed',
+    message: `Interaction inspection complete: ${interactions.length} tested, ${failed} not clickable, ${inaccessibleRows} row(s) not keyboard accessible`
+  });
+  return interactions;
+}
+
 async function auditPage(page, targetUrl, progress, workflowConfig = [], testDataIdentifier = '', deepDiscovery = true) {
   const started = Date.now();
   const consoleErrors = []; const pageErrors = []; const failedRequests = []; const apiCalls = [];
-  const onConsole = message => { if (message.type() === 'error') consoleErrors.push(message.text().slice(0, 500)); };
-  const onPageError = error => pageErrors.push(error.message.slice(0, 500));
-  const onRequestFailed = request => failedRequests.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText || 'failed'}`);
+  const onConsole = message => { if (message.type() === 'error') consoleErrors.push(redactText(message.text())); };
+  const onPageError = error => pageErrors.push(redactText(error.message));
+  const onRequestFailed = request => failedRequests.push(redactText(`${request.method()} ${safeObservedUrl(request.url())} — ${request.failure()?.errorText || 'failed'}`));
   const onResponse = response => {
     const request = response.request();
     if (['fetch', 'xhr'].includes(request.resourceType()) && apiCalls.length < 100) {
@@ -250,17 +308,17 @@ async function auditPage(page, targetUrl, progress, workflowConfig = [], testDat
   page.on('console', onConsole); page.on('pageerror', onPageError); page.on('requestfailed', onRequestFailed); page.on('response', onResponse);
   let response;
   try {
-    progress('check_started', { check: 'Page navigation and HTTP response', checkIndex: 1, totalChecks: 12, message: 'Opening page and checking HTTP response' });
+    progress('check_started', { check: 'Page navigation and HTTP response', checkIndex: 1, totalChecks: 14, message: 'Opening page and checking HTTP response' });
     response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    progress('check_started', { check: 'Authenticated route discovery', checkIndex: 2, totalChecks: 12, message: 'Opening navigation menus and discovering routes' });
+    progress('check_started', { check: 'Authenticated route discovery', checkIndex: 2, totalChecks: 14, message: 'Opening navigation menus and discovering routes' });
     const links = await discoverMenuRoutes(page, targetUrl, progress, deepDiscovery);
     const screenshot = await page.screenshot({ type: 'jpeg', quality: 45, fullPage: false }).catch(() => null);
     if (screenshot) progress('page_preview', {
       status: 'information', message: 'Live page preview updated',
       preview: `data:image/jpeg;base64,${screenshot.toString('base64')}`
     });
-    progress('check_started', { check: 'DOM, accessibility and functional inspection', checkIndex: 3, totalChecks: 12, message: 'Inspecting page structure, controls, images and workflows' });
+    progress('check_started', { check: 'DOM, accessibility and functional inspection', checkIndex: 3, totalChecks: 14, message: 'Inspecting page structure, controls, images and workflows' });
     const facts = await page.evaluate(() => {
       const visible = element => Boolean(element.getClientRects().length);
       const images = [...document.images];
@@ -325,6 +383,9 @@ async function auditPage(page, targetUrl, progress, workflowConfig = [], testDat
       ...form.fields.filter(field => field.required && !field.labelled).map(field => `Form ${form.index}: required field "${field.name}" has no accessible label`),
       ...(!form.hasSubmit ? [`Form ${form.index}: no explicit submit control detected`] : [])
     ]);
+    const interactions = await inspectInteractionActionability(page, progress);
+    const unclickableInteractions = interactions.filter(item => !item.clickable);
+    const inaccessibleRows = interactions.filter(item => item.row && !item.keyboardAccessible);
     const features = [
       facts.forms ? `${facts.forms} form(s)` : null,
       facts.tables ? `${facts.tables} table/grid(s)` : null,
@@ -343,7 +404,9 @@ async function auditPage(page, targetUrl, progress, workflowConfig = [], testDat
       ['Password fields are masked', facts.passwordFieldsUnmasked === 0, `${facts.passwordFieldsUnmasked} unmasked field(s)`, 'critical'],
       ['No unhandled page errors', pageErrors.length === 0, `${pageErrors.length} page error(s)`, 'critical'],
       ['No console errors', consoleErrors.length === 0, `${consoleErrors.length} console error(s)`, 'warning'],
-      ['No failed network requests', failedRequests.length === 0, `${failedRequests.length} failed request(s)`, 'failed']
+      ['No failed network requests', failedRequests.length === 0, `${failedRequests.length} failed request(s)`, 'failed'],
+      ['Buttons, links, and clickable rows are operable', unclickableInteractions.length === 0, `${unclickableInteractions.length} control(s) failed safe click actionability`, 'failed'],
+      ['Clickable table rows support keyboard access', inaccessibleRows.length === 0, `${inaccessibleRows.length} clickable row(s) lack keyboard access`, 'warning']
     ].map(([name, passed, detail, severity]) => ({ name, passed, detail, severity }));
     for (let index = 0; index < checks.length; index += 1) {
       const check = checks[index];
@@ -354,7 +417,7 @@ async function auditPage(page, targetUrl, progress, workflowConfig = [], testDat
     }
     return {
       url: page.url(), title: facts.title, status: response?.status() ?? null, durationMs: Date.now() - started,
-      checks, facts, features, actions, validationIssues, consoleErrors, pageErrors, failedRequests: failedRequests.slice(0, 20), apiCalls, links
+      checks, facts, features, actions, interactions, validationIssues, consoleErrors, pageErrors, failedRequests: failedRequests.slice(0, 20), apiCalls, links
     };
   } finally {
     page.off('console', onConsole); page.off('pageerror', onPageError); page.off('requestfailed', onRequestFailed); page.off('response', onResponse);
@@ -511,8 +574,53 @@ export default async function handler(request, response) {
       .filter(call => !call.ok)
       .map(call => ({ page: item.url, ...call })));
     const actions = pages.flatMap(item => item.actions || []);
+    const interactions = pages.flatMap(item => item.interactions || []);
+    let findingIndex = 0;
+    const findings = pages.flatMap(item => {
+      const pageContext = { page: safeObservedUrl(item.url), pageTitle: item.title || 'Untitled page' };
+      return [
+        ...item.checks.filter(check => !check.passed).map(check => ({
+          id: `finding-${++findingIndex}`, ...pageContext, type: 'page_check', severity: check.severity,
+          location: check.name, message: check.name, evidence: check.detail,
+          recommendedFix: recommendedFix('page_check', check.name)
+        })),
+        ...(item.apiCalls || []).filter(call => !call.ok).map(call => ({
+          id: `finding-${++findingIndex}`, ...pageContext, type: 'api', severity: call.status >= 500 ? 'critical' : 'failed',
+          location: `${call.method} ${call.url}`, message: `API returned HTTP ${call.status}`,
+          evidence: { method: call.method, url: call.url, status: call.status }, recommendedFix: recommendedFix('api')
+        })),
+        ...(item.interactions || []).filter(interaction => !interaction.clickable || interaction.row && !interaction.keyboardAccessible).map(interaction => ({
+          id: `finding-${++findingIndex}`, ...pageContext, type: 'interaction', severity: interaction.clickable ? 'warning' : 'failed',
+          location: interaction.label, element: { tag: interaction.tag, role: interaction.role, tableRow: interaction.row },
+          message: interaction.clickable ? 'Clickable table row is not keyboard accessible' : 'Control is not actionable',
+          evidence: interaction.issue || `keyboardAccessible=${interaction.keyboardAccessible}`, recommendedFix: recommendedFix('interaction')
+        })),
+        ...(item.validationIssues || []).map(issue => ({
+          id: `finding-${++findingIndex}`, ...pageContext, type: 'validation', severity: 'warning', location: 'Form',
+          message: issue, evidence: issue, recommendedFix: recommendedFix('validation')
+        })),
+        ...(item.actions || []).filter(action => !action.tested && ['data-changing', 'destructive'].includes(action.classification)).map(action => ({
+          id: `finding-${++findingIndex}`, ...pageContext, type: 'workflow', severity: action.classification === 'destructive' ? 'warning' : 'information',
+          location: action.label, action: action.label, classification: action.classification,
+          message: `${action.label} was not executed`, evidence: action.reason, recommendedFix: recommendedFix('workflow')
+        })),
+        ...(item.pageErrors || []).map(error => ({
+          id: `finding-${++findingIndex}`, ...pageContext, type: 'runtime', severity: 'critical', location: 'Browser page',
+          message: 'Unhandled page error', evidence: error, recommendedFix: recommendedFix('page_check', 'page error')
+        })),
+        ...(item.consoleErrors || []).map(error => ({
+          id: `finding-${++findingIndex}`, ...pageContext, type: 'console', severity: 'warning', location: 'Browser console',
+          message: 'Console error', evidence: error, recommendedFix: recommendedFix('page_check', 'console error')
+        })),
+        ...(item.failedRequests || []).map(error => ({
+          id: `finding-${++findingIndex}`, ...pageContext, type: 'network', severity: 'failed', location: 'Network request',
+          message: 'Network request failed', evidence: error, recommendedFix: recommendedFix('page_check', 'network request')
+        }))
+      ];
+    });
+    const findingsByPage = Object.fromEntries(pages.map(item => [safeObservedUrl(item.url), findings.filter(finding => finding.page === safeObservedUrl(item.url))]));
     const report = {
-      id: `run-${Date.now()}`, target: target.origin, startedAt: auditStartedAt.toISOString(), completedAt: new Date().toISOString(),
+      reportVersion: '2.0', id: `run-${Date.now()}`, target: target.origin, startedAt: auditStartedAt.toISOString(), completedAt: new Date().toISOString(),
       durationMs: Date.now() - auditStartedAt.getTime(),
       runId, testingDepth, dataSafety, testingMode, testDataPrefix, login: loginResult, pagesScanned: pages.length, passed: checks.filter(item => item.passed).length,
       warnings: checks.filter(item => !item.passed && item.severity === 'warning').length,
@@ -526,6 +634,10 @@ export default async function handler(request, response) {
       formValidationFailures: pages.reduce((sum, item) => sum + (item.validationIssues?.length || 0), 0),
       permissionFailures: 0, apiFailures: apiIssues.length,
       uiFailures: checks.filter(item => !item.passed && ['failed', 'critical'].includes(item.severity)).length,
+      interactionsTested: interactions.length,
+      interactionFailures: interactions.filter(item => !item.clickable).length,
+      clickableRowsTested: interactions.filter(item => item.row).length,
+      findingsCount: findings.length, findings, findingsByPage,
       testDataIdentifier, cleanupRegistry: [],
       crudLifecycle: ['Create', 'Verify', 'Search', 'Open', 'Update', 'Verify', 'Delete', 'Verify cleanup'],
       criticalIssues, apiIssues, duplicateUrls, pages
