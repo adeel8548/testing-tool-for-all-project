@@ -22,7 +22,7 @@ async function checkWorker() {
 
 function renderReport(report) {
   latestReport = report; results.hidden = false;
-  summary.innerHTML = `<div><strong>${report.pagesScanned}</strong><span>Pages scanned</span></div><div><strong class="pass-text">${report.passed}</strong><span>Checks passed</span></div><div><strong class="fail-text">${report.failed}</strong><span>Checks failed</span></div><div><strong>${report.login?.attempted ? (report.login.leftLoginPage ? 'Passed' : 'Review') : 'Skipped'}</strong><span>Login flow</span></div>`;
+  summary.innerHTML = `<div><strong>${report.pagesScanned}</strong><span>Pages scanned</span></div><div><strong class="pass-text">${report.passed}</strong><span>Passed</span></div><div><strong>${report.warnings ?? 0}</strong><span>Warnings</span></div><div><strong class="fail-text">${report.failed}</strong><span>Failed</span></div><div><strong class="fail-text">${report.critical ?? 0}</strong><span>Critical</span></div>`;
   pageResults.innerHTML = report.pages.map(page => `<article class="page-result"><div class="page-head"><div><h3>${escapeHtml(page.title || 'Untitled page')}</h3><div class="url" title="${escapeHtml(page.url)}">${escapeHtml(page.url)}</div></div><span class="pill ${page.status < 400 ? 'ready' : ''}">HTTP ${escapeHtml(page.status)}</span></div><div class="checks">${page.checks.map(check => `<div class="check ${check.passed ? '' : 'fail'}"><span class="mark">${check.passed ? '✓' : '×'}</span><div><b>${escapeHtml(check.name)}</b><small>${escapeHtml(check.detail)}</small></div></div>`).join('')}</div></article>`).join('');
   results.scrollIntoView({ behavior: 'smooth' });
 }

@@ -8,6 +8,16 @@ export const config = { maxDuration: 300 };
 
 const PRIVATE_V4 = /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
 const PRIVATE_V6 = /^(::1$|::$|fc|fd|fe80)/i;
+const LOGOUT_PATH = /(?:^|\/)(?:logout|log-out|signout|sign-out|logoff|log-off)(?:\/|$)/i;
+
+function crawlCandidate(raw, origin) {
+  try {
+    const candidate = new URL(raw, origin);
+    candidate.hash = '';
+    if (candidate.origin !== origin || LOGOUT_PATH.test(candidate.pathname)) return null;
+    return candidate;
+  } catch { return null; }
+}
 
 function authorized(request) {
   const expected = process.env.PLATFORM_ACCESS_KEY;
@@ -53,8 +63,10 @@ async function login(page, loginConfig, origin) {
     ? page.locator(loginConfig.submitSelector).first()
     : page.getByRole('button', { name: /sign in|log in|login|continue|submit/i }).first();
   await submit.click();
-  await page.waitForLoadState('domcontentloaded');
-  return { attempted: true, finalUrl: page.url(), leftLoginPage: page.url() !== loginTarget.href };
+  await page.waitForURL(url => url.href !== loginTarget.href, { timeout: 12_000 }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  const finalUrl = page.url();
+  return { attempted: true, finalUrl, leftLoginPage: finalUrl !== loginTarget.href };
 }
 
 async function auditPage(page, targetUrl) {
@@ -93,18 +105,19 @@ async function auditPage(page, targetUrl) {
       };
     });
     const checks = [
-      ['HTTP response is successful', Boolean(response && response.status() < 400), `Status ${response?.status() ?? 'unknown'}`],
-      ['Document has a title', Boolean(facts.title.trim()), facts.title || 'Missing title'],
-      ['Page has a primary heading', facts.headings > 0, `${facts.headings} h1 element(s)`],
-      ['Images load successfully', facts.brokenImages === 0, `${facts.brokenImages} broken image(s)`],
-      ['Images have alt attributes', facts.missingAlt === 0, `${facts.missingAlt} image(s) without alt`],
-      ['Form controls have labels', facts.unlabeledControls === 0, `${facts.unlabeledControls} unlabeled control(s)`],
-      ['Buttons have accessible names', facts.unnamedButtons === 0, `${facts.unnamedButtons} unnamed button(s)`],
-      ['No horizontal page overflow', !facts.overflow, facts.overflow ? 'Overflow detected' : 'No overflow'],
-      ['Password fields are masked', facts.passwordFieldsUnmasked === 0, `${facts.passwordFieldsUnmasked} unmasked field(s)`],
-      ['No unhandled page errors', pageErrors.length === 0, `${pageErrors.length} page error(s)`],
-      ['No console errors', consoleErrors.length === 0, `${consoleErrors.length} console error(s)`]
-    ].map(([name, passed, detail]) => ({ name, passed, detail }));
+      ['HTTP response is successful', Boolean(response && response.status() < 400), `Status ${response?.status() ?? 'unknown'}`, 'critical'],
+      ['Document has a title', Boolean(facts.title.trim()), facts.title || 'Missing title', 'warning'],
+      ['Page has a primary heading', facts.headings > 0, `${facts.headings} h1 element(s)`, 'warning'],
+      ['Images load successfully', facts.brokenImages === 0, `${facts.brokenImages} broken image(s)`, 'failed'],
+      ['Images have alt attributes', facts.missingAlt === 0, `${facts.missingAlt} image(s) without alt`, 'warning'],
+      ['Form controls have labels', facts.unlabeledControls === 0, `${facts.unlabeledControls} unlabeled control(s)`, 'warning'],
+      ['Buttons have accessible names', facts.unnamedButtons === 0, `${facts.unnamedButtons} unnamed button(s)`, 'warning'],
+      ['No horizontal page overflow', !facts.overflow, facts.overflow ? 'Overflow detected' : 'No overflow', 'failed'],
+      ['Password fields are masked', facts.passwordFieldsUnmasked === 0, `${facts.passwordFieldsUnmasked} unmasked field(s)`, 'critical'],
+      ['No unhandled page errors', pageErrors.length === 0, `${pageErrors.length} page error(s)`, 'critical'],
+      ['No console errors', consoleErrors.length === 0, `${consoleErrors.length} console error(s)`, 'warning'],
+      ['No failed network requests', failedRequests.length === 0, `${failedRequests.length} failed request(s)`, 'failed']
+    ].map(([name, passed, detail, severity]) => ({ name, passed, detail, severity }));
     const links = await page.locator('a[href]').evaluateAll((anchors, base) => anchors
       .map(anchor => { try { return new URL(anchor.getAttribute('href'), base).href; } catch { return null; } })
       .filter(Boolean), targetUrl);
@@ -156,14 +169,19 @@ export default async function handler(request, response) {
 
     const requestedUrls = Array.isArray(body?.pageUrls) ? body.pageUrls.slice(0, maxPages) : [];
     const discoveredUrls = await sitemapUrls(target, maxPages);
-    const queue = [target.href]; const queued = new Set(queue); const visited = new Set(); const pages = [];
+    const startingUrls = [];
+    if (loginResult.attempted && loginResult.leftLoginPage) {
+      const dashboard = await safeUrl(loginResult.finalUrl, target.origin);
+      dashboard.hash = '';
+      startingUrls.push(dashboard.href);
+    }
+    if (!startingUrls.includes(target.href)) startingUrls.push(target.href);
+    const queue = [...startingUrls]; const queued = new Set(queue); const visited = new Set(); const pages = [];
     for (const raw of [...requestedUrls, ...discoveredUrls]) {
-      try {
-        const candidate = new URL(raw, target.origin); candidate.hash = '';
-        if (candidate.origin === target.origin && !queued.has(candidate.href)) {
-          queue.push(candidate.href); queued.add(candidate.href);
-        }
-      } catch { /* ignore malformed configured or sitemap URLs */ }
+      const candidate = crawlCandidate(raw, target.origin);
+      if (candidate && !queued.has(candidate.href)) {
+        queue.push(candidate.href); queued.add(candidate.href);
+      }
     }
     while (queue.length && pages.length < maxPages) {
       const next = queue.shift();
@@ -173,13 +191,10 @@ export default async function handler(request, response) {
       const result = await auditPage(page, safe.href);
       pages.push(result);
       for (const link of result.links) {
-        try {
-          const candidate = new URL(link);
-          candidate.hash = '';
-          if (candidate.origin === target.origin && !queued.has(candidate.href)) {
-            queue.push(candidate.href); queued.add(candidate.href);
-          }
-        } catch { /* ignore malformed links discovered in page markup */ }
+        const candidate = crawlCandidate(link, target.origin);
+        if (candidate && !queued.has(candidate.href)) {
+          queue.push(candidate.href); queued.add(candidate.href);
+        }
       }
     }
     clearTimeout(timeout);
@@ -187,7 +202,9 @@ export default async function handler(request, response) {
     const report = {
       id: `run-${Date.now()}`, target: target.origin, startedAt: new Date().toISOString(),
       login: loginResult, pagesScanned: pages.length, passed: checks.filter(item => item.passed).length,
-      failed: checks.filter(item => !item.passed).length, pages
+      warnings: checks.filter(item => !item.passed && item.severity === 'warning').length,
+      failed: checks.filter(item => !item.passed && item.severity === 'failed').length,
+      critical: checks.filter(item => !item.passed && item.severity === 'critical').length, pages
     };
     return response.status(200).json(report);
   } catch (error) {
